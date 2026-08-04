@@ -1,0 +1,28 @@
+[project]
+name = "semdetect"
+version = "0.1.0"
+description = "Bounding-box object detection with an optional FiLM-conditioned semantic embedding of the target's text description, for objects with high intra-class appearance variance."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE.md" }
+dependencies = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "ultralytics>=8.4",
+    "open-clip-torch>=2.24",
+    "torchmetrics>=1.4",
+    "pyyaml>=6.0",
+    "pandas>=2.0",
+    "pillow>=10.0",
+    "tqdm>=4.66",
+    "pycocotools>=2.0.11",
+    "transformers>=4.44",
+    "sentencepiece>=0.2.2",
+    "accelerate>=1.14.0",
+]
+
+[tool.uv]
+# Application, not a library: manage the venv/deps but don't build/install
+# semdetect itself as a wheel. `python -m semdetect.train` relies on the
+# repo root being on sys.path, same as before.
+package = false
