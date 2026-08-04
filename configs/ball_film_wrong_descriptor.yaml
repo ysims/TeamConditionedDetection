@@ -1,0 +1,55 @@
+# Ablation: FiLM conditioned on a real CLIP embedding, but of a
+# *different* ball's description (data.description_mode: shuffled - a
+# fixed derangement, see semdetect/data/dataset.py:build_shuffled_lookup).
+# The embedding is well-formed and semantically real, just wrong for the
+# ball actually in the image. At early placement (film_layer_indices:
+# [4, 6, 8], the default now that early beat late for yolo26n on this
+# dataset - see ball_film_early.yaml vs. ball_film_late.yaml). If this
+# performs close to ball_film_early.yaml, correct semantic content isn't
+# what's driving the gains there. See also
+# ball_film_random_embedding.yaml, which ablates the opposite way (no
+# real content at all, but per-instance consistent). (An earlier version
+# of this ablation ran at late placement, archived at
+# outputs/sweep/ball_film_wrong_descriptor_late/ - moot there since even
+# correctly-conditioned FiLM didn't beat baseline at late placement.)
+name: ball_film_wrong_descriptor
+
+data:
+  train_manifest: data/manifest/train.csv
+  val_manifest: data/manifest/val.csv
+  test_manifest: data/manifest/test.csv
+  descriptions_csv: data/ball_descriptions.csv
+  description_field: Description
+  description_mode: shuffled
+  class_names: [ball]
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+embedding:
+  provider: clip
+  model_name: ViT-B-32-quickgelu
+  pretrained: openai
+  device: cpu
+
+model:
+  architecture: yolo
+  variant: yolo26n
+  pretrained: false
+  use_film: true
+  film_hidden_dim: 256
+  film_layer_indices: [4, 6, 8] # early (default): backbone P3/P4/P5, pre-neck-fusion
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/sweep/ball_film_wrong_descriptor
+  checkpoint_metric: map_50
+  log_interval: 20

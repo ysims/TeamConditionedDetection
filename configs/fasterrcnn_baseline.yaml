@@ -1,0 +1,41 @@
+# Faster R-CNN (ResNet-50 FPN) baseline, no FiLM. Pairs with
+# configs/fasterrcnn_film.yaml. ~43M params (see outputs/params_report.csv)
+# vs yolo26n's ~2.5M - the two-stage/ResNet end of the comparison.
+name: fasterrcnn_baseline
+
+data:
+  train_manifest: data/manifest/train.csv
+  val_manifest: data/manifest/val.csv
+  test_manifest: data/manifest/test.csv
+  descriptions_csv: data/ball_descriptions.csv
+  description_field: Description
+  class_names: [ball]
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+embedding:
+  provider: clip
+  model_name: ViT-B-32-quickgelu
+  pretrained: openai
+  device: cpu
+
+model:
+  architecture: fasterrcnn
+  variant: resnet50 # or mobilenet_v3_large / mobilenet_v3_large_320 for a lighter backbone
+  pretrained: false
+  use_film: false
+  film_hidden_dim: 256
+
+train:
+  batch_size: 8
+  lr: 0.0001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/sweep/fasterrcnn_baseline
+  checkpoint_metric: map_50
+  log_interval: 20

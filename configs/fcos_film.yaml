@@ -1,0 +1,45 @@
+# FCOS with FiLM on the pre-FPN ResNet body features (early). Early beat
+# late for yolo26n on this dataset (see configs/ball_film_early.yaml vs.
+# ball_film_late.yaml), so early is the default placement everywhere now
+# except the configs specifically comparing placement. Set
+# model.film_early: false for the FPN-output (late) variant instead.
+# Pairs with configs/fcos_baseline.yaml.
+name: fcos_film
+
+data:
+  train_manifest: data/manifest/train.csv
+  val_manifest: data/manifest/val.csv
+  test_manifest: data/manifest/test.csv
+  descriptions_csv: data/ball_descriptions.csv
+  description_field: Description
+  class_names: [ball]
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+embedding:
+  provider: clip
+  model_name: ViT-B-32-quickgelu
+  pretrained: openai
+  device: cpu
+
+model:
+  architecture: fcos
+  variant: resnet50
+  pretrained: false
+  use_film: true
+  film_hidden_dim: 256
+  film_early: true # early (default)
+
+train:
+  batch_size: 8
+  lr: 0.0001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/sweep/fcos_film
+  checkpoint_metric: map_50
+  log_interval: 20

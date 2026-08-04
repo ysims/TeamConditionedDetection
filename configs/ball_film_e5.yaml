@@ -1,0 +1,43 @@
+# Same as ball_film_early.yaml (early beat late for yolo26n on this
+# dataset, so early is the default placement now) but embedding text with
+# E5 (intfloat/e5-base-v2, a retrieval-tuned sentence embedder) instead of
+# CLIP - pairs with ball_film_bert.yaml and ball_film_early.yaml.
+name: ball_film_e5
+
+data:
+  train_manifest: data/manifest/train.csv
+  val_manifest: data/manifest/val.csv
+  test_manifest: data/manifest/test.csv
+  descriptions_csv: data/ball_descriptions.csv
+  description_field: Description
+  class_names: [ball]
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+embedding:
+  provider: e5
+  model_name: intfloat/e5-base-v2
+  device: cpu
+
+model:
+  architecture: yolo
+  variant: yolo26n
+  pretrained: false
+  use_film: true
+  film_hidden_dim: 256
+  film_layer_indices: [4, 6, 8] # early (default): backbone P3/P4/P5, pre-neck-fusion
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/sweep/ball_film_e5
+  checkpoint_metric: map_50
+  log_interval: 20

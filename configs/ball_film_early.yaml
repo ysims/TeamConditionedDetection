@@ -1,0 +1,55 @@
+# FiLM conditioning applied early: raw backbone features at [4, 6, 8]
+# (same P3/P4/P5 resolutions as the "late" variant's [16, 19, 22], but
+# before the neck's cross-scale fusion and before the backbone's own
+# attention block). Since nc=1 here the embedding can't help with
+# classification (there's only one class); the theory is it should help
+# more with the low-level colour/texture matching that's still intact
+# this early, and gets progressively abstracted away by the time
+# features reach the head. See semdetect/models/yolo_film.py's module
+# docstring for the full layer-by-layer map.
+#
+# Pairs with configs/ball_baseline.yaml and configs/ball_film_late.yaml
+# for a 3-way comparison - identical in every other respect.
+#
+# Trained on the merged manifest (data/manifest), pooled from every
+# NUpbr render run - see scripts/prepare_nupbr_dataset.py.
+name: ball_film_early
+
+data:
+  train_manifest: data/manifest/train.csv
+  val_manifest: data/manifest/val.csv
+  test_manifest: data/manifest/test.csv
+  descriptions_csv: data/ball_descriptions.csv
+  description_field: Description
+  class_names: [ball]
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+embedding:
+  provider: clip
+  model_name: ViT-B-32-quickgelu
+  pretrained: openai
+  device: cpu
+
+model:
+  architecture: yolo
+  variant: yolo26n
+  pretrained: false
+  use_film: true
+  film_hidden_dim: 256
+  film_layer_indices: [4, 6, 8] # backbone P3/P4/P5, pre-neck-fusion
+
+train:
+  epochs: 50
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/sweep/ball_film_early
+  checkpoint_metric: map_50
+  log_interval: 20
