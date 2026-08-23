@@ -1,0 +1,50 @@
+# Same as robot_jersey_role_head_pretrained.yaml (YOLO two-stage, pretrained
+# backbone, FiLM role head) but with role_head_use_distance_feature: false -
+# drops the hand-crafted min-distance-over-cells colour feature, matching
+# robot_jersey_fasterrcnn_role_head_film_only.yaml's config on the other
+# backbone. This is "the method" (see configs/robot_jersey_fasterrcnn_role_head_film_only.yaml's
+# docstring and the Tier-1 ablation results: FiLM-only beat FiLM+distance on
+# Faster R-CNN, 92.1% vs 90.1% role_acc) - the original
+# robot_jersey_role_head_pretrained*.yaml runs left this flag at its
+# role_head_use_distance_feature=True default, so they weren't actually
+# comparing backbones under the settled method. This fixes that.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_role_head_pretrained_film_only.yaml
+name: robot_jersey_role_head_pretrained_film_only_seed44
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: yolo_robot_role
+  variant: yolo26n
+  pretrained: true
+  film_hidden_dim: 256
+  roi_output_size: 8
+  role_head_use_deep_feature: true
+  role_head_use_distance_feature: false
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 44
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_role_head_pretrained_film_only_seed44
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.02

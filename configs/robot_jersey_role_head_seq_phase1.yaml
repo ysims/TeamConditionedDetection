@@ -1,0 +1,49 @@
+# Sequential training, phase 1: detector-only warm start. Same
+# architecture as robot_jersey_role_head.yaml (yolo_robot_role) but
+# auxiliary_loss_weight (= role loss weight) is 0.0, so the role head
+# receives no gradient at all and stays at random init while the detector
+# trains purely on detection_loss - see team_conditioned_detection/models/robot_role.py.
+#
+# Only early_stopping_metrics: [detection_loss] matters here (role_loss
+# isn't being optimized, so watching it would just be noise).
+#
+# Run this FIRST, then point robot_jersey_role_head_seq_phase2.yaml's
+# model.init_checkpoint at this run's checkpoints/best.pt.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_role_head_seq_phase1.yaml
+name: robot_jersey_role_head_seq_phase1
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: yolo_robot_role
+  variant: yolo26n
+  pretrained: false
+  film_hidden_dim: 256
+  conditioning_method: film # irrelevant this phase - role head gets no gradient
+  auxiliary_loss_weight: 0.0 # the whole point of phase 1: role loss contributes nothing
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_role_head_seq_phase1
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [detection_loss]
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.02

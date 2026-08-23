@@ -1,0 +1,58 @@
+# Robot jersey-colour conditioning: teammate/opponent detection, via
+# cross-attention instead of FiLM - see team_conditioned_detection/data/robot_jersey.py and
+# team_conditioned_detection/train_robots.py.
+#
+# Tried after plain FiLM: FiLM's generator produced real, varying gamma/beta
+# per colour pair (not collapsed to identity - see outputs/robot_jersey/
+# robot_jersey_film's diagnostic) but a direct swap test (same image, same
+# two colours, teammate/opponent roles swapped) showed near-identical
+# predictions - the uniform per-channel scale/shift never turned into a
+# usable "does this patch match this specific injected colour" decision.
+# Cross-attention (team_conditioned_detection/models/conditioners.py) lets each spatial
+# position attend to the colour tokens directly, which is a much more
+# natural fit for a comparison/matching task than a global affine.
+#
+# embed_dim fixed at 6 by team_conditioned_detection.data.robot_jersey.EMBED_DIM (see
+# robot_jersey_film.yaml for why). Same early injection points as the FiLM
+# run for a fair comparison.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_cross_attention.yaml
+name: robot_jersey_cross_attention
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: yolo
+  variant: yolo26n
+  pretrained: false
+  use_film: true
+  film_hidden_dim: 256
+  film_layer_indices: [4, 6, 8] # early: backbone P3/P4/P5, pre-neck-fusion
+  conditioning_method: cross_attention
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_cross_attention
+  # val loss, not map_50 - see robot_jersey_film.yaml for why (map_50 can
+  # floor at 0.0 for many epochs on this task even while genuinely
+  # improving; loss is smooth and won't burn early-stopping patience on it).
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.5

@@ -1,0 +1,61 @@
+# Robot jersey-colour conditioning: teammate/opponent detection, FiLM
+# conditioned on (teammate_rgb, opponent_rgb) - see
+# team_conditioned_detection/data/robot_jersey.py and team_conditioned_detection/train_robots.py.
+#
+# embed_dim is fixed at 6 (two RGB triplets, [0,1]) by
+# team_conditioned_detection.data.robot_jersey.EMBED_DIM, not configurable here - FiLM's own
+# generator MLP (film.py's FiLMGenerator: Linear(embed_dim, hidden) ->
+# ReLU -> Linear(hidden, 2*channels)) is exactly the "feed both through an
+# MLP, then into FiLM" the experiment calls for; no separate embedder.
+#
+# film_layer_indices: early placement (backbone P3/P4/P5, pre-neck-fusion)
+# - carried over from the ball-description experiments where early beat
+# late head-to-head; not re-tested here, see configs/archive_pre_sweep/.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_film.yaml
+name: robot_jersey_film
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: yolo
+  variant: yolo26n
+  pretrained: false
+  use_film: true
+  film_hidden_dim: 256
+  film_layer_indices: [4, 6, 8] # early: backbone P3/P4/P5, pre-neck-fusion
+  conditioning_method: film
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_film
+  # val loss, not map_50: map_50 is thresholded (IoU>=0.5, conf>=0.25) and
+  # can sit at a hard 0.0 for many epochs on this small/hard multi-instance
+  # task even while the model is genuinely improving (observed directly -
+  # 7 straight epochs at map_50=0.0 while train loss dropped by >60%) -
+  # early stopping on it would burn through patience during ordinary
+  # cold-start and quit before the model gets a chance to clear the
+  # threshold. Loss is smooth and never floors out.
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_patience: 10
+  # Loss here is a summed multi-term detection loss (box+cls+DFL, scale
+  # ~tens, not the [0,1] map_50 range 0.0001 was tuned for) - too small a
+  # min_delta would make near-every epoch count as "improved" on noise.
+  early_stopping_min_delta: 0.5

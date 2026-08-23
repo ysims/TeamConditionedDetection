@@ -1,0 +1,51 @@
+# Sequential training, phase 2: loads phase 1's detector-only checkpoint,
+# freezes everything except role_head (model.freeze_detector: true - see
+# team_conditioned_detection/train_robots.py's run_robot_training), then trains only the
+# role head on top of frozen, already-converged detection features.
+#
+# Only early_stopping_metrics: [role_loss] matters here (detection_loss is
+# frozen and won't move - watching it would look "stalled" immediately and
+# stop training for the wrong reason).
+#
+# Requires configs/robot_jersey_role_head_seq_phase1.yaml to have been run
+# first (this points at its checkpoint below).
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_role_head_seq_phase2.yaml
+name: robot_jersey_role_head_seq_phase2
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: yolo_robot_role
+  variant: yolo26n
+  pretrained: false
+  film_hidden_dim: 256
+  conditioning_method: film
+  auxiliary_loss_weight: 1.0
+  init_checkpoint: outputs/robot_jersey/robot_jersey_role_head_seq_phase1/checkpoints/best.pt
+  freeze_detector: true
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_role_head_seq_phase2
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [role_loss]
+  early_stopping_patience: 30
+  early_stopping_min_delta: 0.02

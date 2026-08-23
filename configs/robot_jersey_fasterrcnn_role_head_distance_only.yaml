@@ -1,0 +1,50 @@
+# Tier-1 ablation of robot_jersey_fasterrcnn_role_head.yaml (the current
+# best config): role_head_use_deep_feature: false - strips the RoleHead
+# down to *only* the hand-crafted min-distance-over-cells colour feature
+# (2 scalars) -> linear classifier, dropping the whole FiLM-conditioned
+# deep-feature pathway entirely. Answers "is the sophisticated part of
+# this architecture actually earning its keep, or is a trivial nearest-
+# colour comparison doing almost all the work?" See
+# team_conditioned_detection/models/robot_role.py's RoleHead.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_fasterrcnn_role_head_distance_only.yaml
+name: robot_jersey_fasterrcnn_role_head_distance_only
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: fasterrcnn_robot_role
+  variant: resnet50
+  pretrained: true
+  film_hidden_dim: 256
+  conditioning_method: film # unused - no deep feature, so no conditioner is exercised
+  auxiliary_loss_weight: 1.0
+  roi_output_size: 8
+  role_head_use_deep_feature: false
+  role_head_use_distance_feature: true
+
+train:
+  epochs: 200
+  batch_size: 4
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_fasterrcnn_role_head_distance_only
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01

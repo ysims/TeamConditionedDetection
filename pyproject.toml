@@ -1,7 +1,7 @@
 [project]
-name = "semdetect"
+name = "team_conditioned_detection"
 version = "0.1.0"
-description = "Bounding-box object detection with an optional FiLM-conditioned semantic embedding of the target's text description, for objects with high intra-class appearance variance."
+description = "Bounding-box object detection conditioned on team/role context (e.g. jersey colour), for multi-instance scenes where identical-class objects must be told apart by role."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE.md" }
@@ -23,6 +23,7 @@ dependencies = [
 
 [tool.uv]
 # Application, not a library: manage the venv/deps but don't build/install
-# semdetect itself as a wheel. `python -m semdetect.train` relies on the
-# repo root being on sys.path, same as before.
+# team_conditioned_detection itself as a wheel. `python -m
+# team_conditioned_detection.train_robots` relies on the repo root being
+# on sys.path, same as before.
 package = false

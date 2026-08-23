@@ -1,0 +1,50 @@
+# Same two-stage architecture as robot_jersey_role_head.yaml, but the role
+# head's conditioner is cross-attention instead of FiLM (see
+# team_conditioned_detection/models/robot_role.py's RoleHead + team_conditioned_detection/models/
+# conditioners.py). Cross-attention failed identically to FiLM in the
+# earlier single-stage attempts, but that was asking it to solve
+# localization *and* classification jointly across the whole image -
+# confined to a small RoI crop attending to 2 colour tokens, it's a
+# narrower, more natural fit ("which sub-patch of this crop looks like
+# which colour" vs "condition the entire scene"), worth retrying now that
+# localization isn't its problem to solve too.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_role_head_crossattn.yaml
+name: robot_jersey_role_head_crossattn
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: yolo_robot_role
+  variant: yolo26n
+  pretrained: false
+  film_hidden_dim: 256
+  conditioning_method: cross_attention
+  auxiliary_loss_weight: 1.0
+  roi_output_size: 8 # see robot_jersey_role_head.yaml - jersey covers only a small torso patch
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_role_head_crossattn
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 40
+  early_stopping_min_delta: 0.02

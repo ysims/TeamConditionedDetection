@@ -1,0 +1,59 @@
+# Phase 1 of "train Faster R-CNN, then train a standalone classifier":
+# a completely standard, unconditioned Faster R-CNN "robot" detector,
+# trained with auxiliary_loss_weight: 0.0 (an established pattern in this
+# repo - see team_conditioned_detection/config.py's ModelConfig.auxiliary_loss_weight
+# docstring and configs/robot_jersey_role_head_seq_phase1.yaml) so the
+# role head that FasterRCNNRobotRoleDetector always builds still exists in
+# the graph but contributes exactly zero gradient (0.0 * role_loss),
+# leaving this byte-for-byte the same detector construction used by the
+# joint-trained method (same box_score_thresh mitigation, same pretrained-
+# backbone convention) for a fair comparison against Phase 2's standalone
+# classifier - see robot_jersey_standalone_classifier.yaml, which doesn't
+# depend on this checkpoint at all (it trains on GT boxes directly, same
+# convention as every other role head in this project), but conceptually
+# completes the same "detect, then classify" deployable pipeline.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_fasterrcnn_detector_only.yaml
+name: robot_jersey_fasterrcnn_detector_only_seed43
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: fasterrcnn_robot_role
+  variant: resnet50
+  pretrained: true
+  film_hidden_dim: 256
+  conditioning_method: film
+  auxiliary_loss_weight: 0.0
+  roi_output_size: 8
+  role_head_use_deep_feature: true
+  role_head_use_distance_feature: false
+
+train:
+  epochs: 200
+  batch_size: 4
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 43
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_fasterrcnn_detector_only_seed43
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  # detection_loss only - role_loss/role_acc are meaningless here (weight
+  # 0.0, role head never trains), watching them would just add noise to
+  # the early-stopping decision.
+  early_stopping_metrics: [detection_loss, map_50]
+  early_stopping_modes: [min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01

@@ -1,0 +1,58 @@
+# Same two-stage idea as robot_jersey_role_head.yaml, on a torchvision
+# Faster R-CNN backbone instead of YOLO (team_conditioned_detection/models/robot_role.py's
+# FasterRCNNRobotRoleDetector). RPN + box regression + Faster R-CNN's own
+# foreground/background classification stay completely unconditioned, same
+# as the YOLO version; only the role head differs by which backbone
+# feature it RoIAligns from (FPN level "0", stride 4 - finer than YOLO's
+# P3/stride 8, more raw colour detail to work with).
+#
+# detection_loss here is on a very different scale than the YOLO version's
+# (~1-2 vs ~tens - Faster R-CNN's loss terms are already normalized
+# per-proposal) - early_stopping_min_delta is scaled down accordingly.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_fasterrcnn_role_head.yaml
+name: robot_jersey_fasterrcnn_role_head
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: fasterrcnn_robot_role
+  variant: resnet50
+  pretrained: true # ImageNet-pretrained ResNet50 backbone
+  film_hidden_dim: 256
+  conditioning_method: film
+  auxiliary_loss_weight: 1.0
+  roi_output_size: 8 # see robot_jersey_role_head.yaml - jersey covers only a small torso patch
+
+train:
+  epochs: 200
+  # Faster R-CNN (ResNet50+FPN, RPN, RoI heads over ~hundreds of sampled
+  # proposals per image) is far more memory-hungry per-image than YOLO26n -
+  # batch_size 16 OOM'd immediately on the very first forward pass on a
+  # 16GB card. 4 is a safe fallback; revisit if the box has headroom.
+  batch_size: 4
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_fasterrcnn_role_head
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  # role_acc was still bouncing in a noisy plateau (0.66-0.79) rather than
+  # cleanly flat at patience=40 in the last run - more headroom in case
+  # that's residual climb rather than pure noise.
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01

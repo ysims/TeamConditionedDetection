@@ -1,0 +1,54 @@
+# Phase 2 of "train Faster R-CNN, then train a standalone classifier":
+# StandaloneRoleClassifier (team_conditioned_detection/models/standalone_role_classifier.py)
+# - a genuinely separate model with its own small dedicated CNN encoder,
+# no shared backbone/gradient with the Phase 1 detector
+# (robot_jersey_fasterrcnn_detector_only.yaml) at all. Trains on GT boxes
+# directly (same convention as every other role head in this project, and
+# why this doesn't need Phase 1's checkpoint as an input - it only needs
+# boxes, and GT boxes are already in the manifest), so this can run before,
+# after, or without Phase 1 - the two exist together only to demonstrate
+# the full deployable "detect, then classify" pipeline this contrasts
+# against the shared-backbone role heads (RobotRoleDetector,
+# FasterRCNNRobotRoleDetector, RTDETRRobotRoleDetector).
+#
+# conditioning_method/role_head_use_distance_feature match the settled
+# FiLM-only method (see robot_jersey_fasterrcnn_role_head_film_only.yaml)
+# for a fair "same conditioning, different architecture" comparison.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_standalone_role_classifier --config configs/robot_jersey_standalone_classifier.yaml
+name: robot_jersey_standalone_classifier_seed43
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: standalone_role_classifier  # unused by train_standalone_role_classifier.py, kept for consistency/logging
+  conditioning_method: film
+  film_hidden_dim: 256
+  crop_size: 64
+  encoder_channels: 128
+  role_head_use_distance_feature: false
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 43
+  eval_interval: 1
+  output_dir: outputs/robot_jersey/robot_jersey_standalone_classifier_seed43
+  checkpoint_metric: role_loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [role_loss, role_acc]
+  early_stopping_modes: [min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01

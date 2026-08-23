@@ -1,10 +1,15 @@
-# SemDetect
+# TeamConditionedDetection
 
-Bounding-box object detection with an optional FiLM-conditioned semantic
-embedding of the target's text description, for objects with high
-intra-class appearance variance (e.g. balls that vary wildly in colour
-and pattern). Built so the detection architecture, the text embedding
-provider, whether/where FiLM is applied, and the dataset are all
+Bounding-box object detection conditioned on team/role context, for
+multi-instance scenes where identical-class objects must be told apart by
+role rather than appearance alone. Motivating case: detecting robots on a
+field and telling teammates from opponents by jersey colour, where the two
+roles are visually identical except for that colour and the colour itself
+changes every frame.
+
+Built so the detection architecture, the conditioning mechanism (FiLM,
+cross-attention, conditional norm, AdaIN, gated), and whether conditioning
+happens at the whole-detector level or a separate role head are all
 swappable independently via config.
 
 ## Setup
@@ -23,56 +28,47 @@ with an NVIDIA GPU). On a CPU-only machine, install the CPU wheels instead:
 
 ## Dataset
 
-`scripts/prepare_nupbr_dataset.py` turns one or more NUpbr synthetic
-render runs (`raw/*.png` + `meta/*.yaml`, one target-object bbox per
-image) plus a descriptions CSV (`data/ball_descriptions.csv`: one row
-per object instance id, with `Description` and `Colours` text columns)
-into `train.csv` / `val.csv` / `test.csv` manifests:
+`scripts/prepare_robot_jersey_dataset.py` turns one or more NUpbr synthetic
+render runs (`raw/*.png` + `meta/*.yaml`, with `robots: [{id,
+jersey_colour, bbox}, ...]` per image) into `train.csv` / `val.csv` /
+`test.csv` manifests:
 
 ```sh
-uv run python scripts/prepare_nupbr_dataset.py \
-    --run-dir /path/to/NUpbr/outputs/run_1 /path/to/NUpbr/outputs/run_2 /path/to/NUpbr/outputs/run_3 \
-    --descriptions-csv data/ball_descriptions.csv \
-    --object-key ball --class-name ball \
-    --output data/manifest
+uv run python scripts/prepare_robot_jersey_dataset.py \
+    --run-dir /path/to/NUpbr/outputs/run_4 /path/to/NUpbr/outputs/run_5 \
+    --output data/manifest_robots
 ```
 
-`--run-dir` takes one or more runs and pools them before splitting, so a
-later run that introduces new object instances (e.g. `run_2` adding new
-ball ids) merges straight into the same dataset - see the script's
-docstring. Instances present in a run but missing a description row are
-skipped with a warning (not silently dropped-but-uncounted).
-
-The split holds out whole object instance ids (e.g. all images of
-`ball_007`) for val/test rather than splitting randomly, so val/test
-contain appearances the model never saw during training - the split
-that actually tests whether the semantic embedding helps generalize
-across intra-class variance.
-
-Swapping in a different object: rerun with `--object-key <key>
---class-name <name>` against meta yaml that has a
-`<key>: {id, bbox}` entry and a matching descriptions CSV, no code
-changes needed.
-
-`scripts/build_full_dataset.py` is the separate "archive the whole
-dataset" path: copies every image with a valid bbox (regardless of
-description coverage) across one or more runs into one self-contained
-folder with flattened annotations - meant for publishing/sharing as
-dataset evidence, not for training directly. `--exclude-instance <id>...`
-drops instances that shouldn't be in the dataset at all (as opposed to
-one that's just temporarily missing a description).
+Each robot's jersey colour is drawn fresh per frame rather than being a
+fixed per-instance property, so there's no colour vocabulary to hold out
+across splits the way the old ball-description approach held out object
+instance ids - images are partitioned randomly instead, with each image's
+robots kept together in one split. The renderer guarantees at most 2
+distinct jersey colours per image regardless of robot count, which is
+exactly what the role-assignment scheme in
+`team_conditioned_detection/data/robot_jersey.py` needs: group robots by
+colour, randomly assign one group teammate and the other opponent.
 
 ## Training
 
+Two architecture families, both driven by the same config schema
+(`team_conditioned_detection/robot_config.py`) and epoch loop
+(`team_conditioned_detection/engine/trainer.py`):
+
 ```sh
-uv run python -m semdetect.train --config configs/ball_baseline.yaml
-uv run python -m semdetect.train --config configs/ball_film_late.yaml
+# Two-stage: unconditioned detector + a separate FiLM/cross-attention-
+# conditioned role head (see "Architectures" below for why).
+uv run python -m team_conditioned_detection.train_robots --config configs/robot_jersey_fasterrcnn_role_head.yaml
+
+# Single-stage: the whole detector is conditioned on (teammate_rgb, opponent_rgb).
+uv run python -m team_conditioned_detection.train_robots --config configs/robot_jersey_film.yaml
 ```
 
 Every run trains for up to `train.epochs` (a generous ceiling, default
-200) but stops early once `train.checkpoint_metric` (default `map_50`)
-hasn't improved for `train.early_stopping_patience` eval rounds (default
-10 - set to `null` to disable and always run the full ceiling).
+200) but stops early once every metric in `train.checkpoint_metric` /
+`train.early_stopping_metrics` hasn't improved for
+`train.early_stopping_patience` eval rounds (default 10 - set to `null`
+to disable and always run the full ceiling).
 
 Each run writes to `train.output_dir`:
 
@@ -84,91 +80,70 @@ Each run writes to `train.output_dir`:
 
 ### Architectures
 
-Registered under `semdetect.models.registry` (`model.architecture` in
-config), each wrapping a real library implementation rather than a
-reimplementation - see each file's module docstring for its layer map
-and exactly where FiLM hooks in:
+Registered under `team_conditioned_detection.models.registry`
+(`model.architecture` in config):
 
-| `model.architecture` | `model.variant` examples | file | library |
-| --- | --- | --- | --- |
-| `yolo` | `yolo26n`, `yolo11n`, `yolov8n` | `semdetect/models/yolo_film.py` | Ultralytics |
-| `rtdetr` | `rtdetr-l` | `semdetect/models/rtdetr_film.py` | Ultralytics |
-| `fasterrcnn` | `resnet50`, `mobilenet_v3_large`, `mobilenet_v3_large_320` | `semdetect/models/torchvision_film.py` | torchvision |
-| `fcos` | `resnet50` | `semdetect/models/torchvision_film.py` | torchvision |
+| `model.architecture` | approach | file |
+| --- | --- | --- |
+| `yolo_robot_role` | two-stage: unconditioned YOLO detector + conditioned role head | `team_conditioned_detection/models/robot_role.py` |
+| `rtdetr_robot_role` | two-stage, RT-DETR detector | `team_conditioned_detection/models/robot_role.py` |
+| `fasterrcnn_robot_role` | two-stage, Faster R-CNN detector | `team_conditioned_detection/models/robot_role.py` |
+| `standalone_role_classifier` | role classification only, on GT/external boxes, no detector | `team_conditioned_detection/models/standalone_role_classifier.py` |
+| `yolo` | single-stage: whole detector conditioned | `team_conditioned_detection/models/yolo_film.py` |
+| `rtdetr` | single-stage, RT-DETR | `team_conditioned_detection/models/rtdetr_film.py` |
+| `fasterrcnn` / `fcos` | single-stage, torchvision | `team_conditioned_detection/models/torchvision_film.py` |
 
-`yolo`/`rtdetr` place FiLM via `model.film_layer_indices` (`null` = auto:
-the layers feeding the detection head, "late"; explicit indices, e.g.
-`[4, 6, 8]` for yolo26n, condition on raw backbone features instead,
-"early"). `fasterrcnn`/`fcos` use the simpler `model.film_early: true/false`
-(FPN outputs vs. the backbone body before the FPN) since torchvision's
-multi-scale features are dict-keyed, not index-addressable the same way.
-See `configs/*_film.yaml` / `configs/*_film_early.yaml` for one example
-of each.
+The two-stage (`*_robot_role`) architectures exist because the single-stage
+approach has a diagnosed failure mode: conditioning the whole detection
+head means box regression is exposed to the same hard-to-learn
+conditioning signal as the role decision, and a swap test (same image,
+roles reversed) showed predictions barely changing either way. The
+two-stage split makes detection completely unconditioned and puts a small
+FiLM/cross-attention-conditioned classifier head on each detected box's
+RoIAlign'd feature instead - see `robot_role.py`'s module docstring for
+the full diagnosis.
+
+`model.conditioning_method` picks the modulation mechanism at each
+conditioning point - `film` (default), `cross_attention`,
+`conditional_batchnorm`, `conditional_layernorm`, `adain`, or `gated` -
+see `team_conditioned_detection/models/conditioners.py`.
 
 Add another architecture by implementing the `Detector` interface
-(`semdetect/models/base.py`) and `@register_model("name")`;
+(`team_conditioned_detection/models/base.py`) and `@register_model("name")`;
 `engine/trainer.py` only depends on that interface.
-
-### Text embedding providers
-
-`embedding.provider` in config, all exposing the same `.encode(text) ->
-(embed_dim,) tensor` interface (`semdetect/data/embedders.py` +
-`semdetect/data/clip_embedder.py`):
-
-| `provider` | what it is |
-| --- | --- |
-| `clip` | open_clip (default `ViT-B-32-quickgelu`/`openai`) |
-| `bert` | plain `bert-base-uncased`, mean-pooled |
-| `e5` | `intfloat/e5-base-v2`, mean-pooled with its `"query: "` prefix convention |
-| `random` | ablation - a fixed per-text random unit vector, see below |
 
 ### Ablations
 
-Two ways to isolate "is FiLM using the *semantic content*, or just the
-extra parameters / a per-instance identifier":
+- `model.use_film: false` - master switch, no conditioning at all.
+- `data.wrong_conditioning: true` - inject a random RGB pair decoupled
+  from the actual jersey colours (ground truth stays correct); tests
+  whether training can still reach non-trivial role accuracy without a
+  real colour signal to learn from.
+- `model.roi_output_size` / `role_head_use_deep_feature` /
+  `role_head_use_distance_feature` (two-stage only) - isolate whether the
+  learned conditioned feature or the hand-crafted colour-distance feature
+  is doing the work.
+- `model.init_checkpoint` + `model.freeze_detector` - sequential training:
+  warm-start from a detector-only run, then freeze everything but the role
+  head (see `configs/robot_jersey_role_head_seq_phase1.yaml` /
+  `_phase2.yaml`).
 
-- `embedding.provider: random` (`configs/ball_film_random_embedding.yaml`)
-  - a deterministic per-text random vector: right shape, per-instance
-  consistent, zero semantic content.
-- `data.description_mode: shuffled` (`configs/ball_film_wrong_descriptor.yaml`)
-  - every instance gets a real CLIP embedding, but of a *different*
-  ball's description (a fixed derangement, `build_shuffled_lookup` in
-  `semdetect/data/dataset.py`) - real content, wrong instance.
-
-If FiLM performs about the same under either ablation as with the real,
-correctly-matched embedding, the gains aren't coming from semantic
-content specifically.
-
-### Comparing against zero-shot open-vocabulary detectors
-
-Grounding DINO and OWL-ViT are natively text-conditioned (image + text
-prompt in, boxes out), so they don't fit the FiLM-on-a-closed-set-detector
-pattern above - they're run zero-shot (pretrained weights, no
-fine-tuning) as reference points instead:
+### Post-hoc analysis
 
 ```sh
-uv run python scripts/zero_shot_eval.py --model grounding_dino \
-    --manifest data/manifest/test.csv
-uv run python scripts/zero_shot_eval.py --model owlvit \
-    --manifest data/manifest/test.csv
+# Nearest-colour heuristic vs. the learned role head, plus a swap test
+# scored against the original ground truth.
+uv run python scripts/evaluate_role_conditioning.py \
+    --config outputs/robot_jersey/<run>/config.yaml \
+    --checkpoint outputs/robot_jersey/<run>/checkpoints/best.pt
+
+# Swap test on GT boxes scored against the flipped label - does swapping
+# the injected colours actually flip the prediction the way it should?
+uv run python scripts/evaluate_swap_consistency.py \
+    --config outputs/robot_jersey/<run>/config.yaml \
+    --checkpoint outputs/robot_jersey/<run>/checkpoints/best.pt
+
+# Pure rule-based baseline, no trained model: classify each GT box by
+# nearest-colour distance alone.
+uv run python scripts/evaluate_colour_rule_baseline.py --manifest data/manifest_robots/test.csv
 ```
-
-Prompted with `"a {description} {class_name}"` per image (both models
-need the object noun present, not just a bare attribute phrase - see the
-script's module docstring for the measurement behind that). Images are
-letterboxed identically to training, so `outputs/zero_shot/<model>/metrics.json`
-is directly comparable to a trained run's `metrics/test.json`.
-
-### Parameter counts
-
-```sh
-uv run python scripts/params_report.py
-```
-
-Writes `outputs/params_report.csv`: every architecture above (FiLM on/off)
-plus every text embedder plus the zero-shot foundation models, in one
-table - e.g. `yolo26n` is ~2.5M params vs. Grounding DINO tiny's ~172M -
-the evidence for whether a giant open-vocab model is actually a
-reasonable fit for a low-resource robot. Foundation models are built from
-their HuggingFace config only (no multi-GB weight download needed just to
-count parameters).

@@ -1,0 +1,75 @@
+# Robot jersey-colour conditioning, two-stage: unconditioned single-class
+# "robot" detection (box regression/objectness never see the colour
+# conditioning) + a separate RoIAlign'd, FiLM-conditioned role head that
+# classifies each detected robot as teammate/opponent from its own
+# box-local feature crop. See team_conditioned_detection/models/robot_role.py for the full
+# rationale (this replaces the single-stage FiLM/cross-attention attempts,
+# both of which failed identically - swap-invariant predictions, ~chance
+# classification accuracy - because the whole detection head was exposed
+# to the same hard conditioning signal as the classification decision).
+#
+# architecture: yolo_robot_role is a different registered architecture
+# from "yolo" (see team_conditioned_detection/models/robot_role.py) - most model.* fields
+# below that apply to the FiLM path (use_film, film_layer_indices,
+# conditioning_method, auxiliary_loss_weight) are simply unused here.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_role_head.yaml
+name: robot_jersey_role_head_seed43
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: yolo_robot_role
+  variant: yolo26n
+  pretrained: false
+  film_hidden_dim: 256 # role head's FiLM generator hidden dim
+  # A jersey covers only a small torso patch of a robot's full bounding
+  # box (confirmed visually) - 4x4 was coarse enough to blend it into
+  # surrounding grey/dark chassis before the classifier saw it. See
+  # team_conditioned_detection/models/robot_role.py's RoleHead.
+  roi_output_size: 8
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 43
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_role_head_seed43
+  # val loss, not map_50 - see robot_jersey_film.yaml for why (map_50 can
+  # floor at 0.0 for many epochs on this task even while genuinely
+  # improving; loss is smooth and won't burn early-stopping patience on it).
+  # checkpoint_metric still just picks which epoch's weights are "best.pt".
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  # detection_loss and role_loss converge at very different rates (fast vs
+  # slow - confirmed directly: role_acc was still climbing, 71.9% -> 72.4%,
+  # in the last 5 epochs of the run that stopped on combined "loss" alone,
+  # because detection_loss's early plateau made the *sum* look stalled).
+  # Watching them separately means training only stops once NEITHER is
+  # improving, not as soon as their sum looks flat. role_acc (higher is
+  # better) added alongside the two losses (lower is better) - possible
+  # for a loss to plateau while accuracy is still creeping up, or vice
+  # versa, so it's worth watching independently too.
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 50
+  # role_loss's whole observed range is ~0.4-0.7 (much smaller scale than
+  # detection_loss, ~tens) - min_delta has to suit the smaller one or
+  # role_loss's "improved" check would almost never fire. The tradeoff:
+  # detection_loss becomes proportionally more lenient (small fluctuations
+  # count as "improvement" more easily) - a safe direction to be wrong in,
+  # since it only biases toward training a bit longer, not stopping early.
+  early_stopping_min_delta: 0.02

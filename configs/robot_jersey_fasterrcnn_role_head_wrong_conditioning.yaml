@@ -1,0 +1,52 @@
+# Tier-1 ablation of robot_jersey_fasterrcnn_role_head.yaml (the current
+# best config): data.wrong_conditioning: true - on the *training* split
+# only, the injected (teammate_rgb, opponent_rgb) is replaced with a
+# fresh random RGB pair every access, decoupled from the actual jersey
+# colours (ground-truth labels stay correct). Val/test are unaffected -
+# still real, correct conditioning - so this measures whether a model
+# trained on uninformative conditioning ever learns to use real
+# conditioning when it's actually given some, or whether it's learned to
+# ignore that input entirely. The training-time complement to the swap
+# test scripts/evaluate_role_conditioning.py already ran on the normally-
+# trained model. See team_conditioned_detection/data/robot_jersey.py.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_fasterrcnn_role_head_wrong_conditioning.yaml
+name: robot_jersey_fasterrcnn_role_head_wrong_conditioning
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+  wrong_conditioning: true
+
+model:
+  architecture: fasterrcnn_robot_role
+  variant: resnet50
+  pretrained: true
+  film_hidden_dim: 256
+  conditioning_method: film
+  auxiliary_loss_weight: 1.0
+  roi_output_size: 8
+
+train:
+  epochs: 200
+  batch_size: 4
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_fasterrcnn_role_head_wrong_conditioning
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01

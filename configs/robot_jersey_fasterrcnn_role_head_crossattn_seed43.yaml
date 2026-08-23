@@ -1,0 +1,49 @@
+# Same as robot_jersey_fasterrcnn_role_head.yaml but the role head's
+# conditioner is cross-attention instead of FiLM - the one combination not
+# yet tried. Cross-attention gave the biggest lift of any single change on
+# the YOLO role head (75.6% -> 80.0% correct-role rate) once the dilution
+# fix (min-distance-over-cells, roi_output_size=8) and top-crop filtering
+# were in place; Faster R-CNN already has near-perfect localization
+# (95.7%) with FiLM, so this tests whether cross-attention's edge on
+# classification carries over to a backbone that isn't also bottlenecked
+# on finding the robots in the first place.
+#
+# Run with:
+#   python -m team_conditioned_detection.train_robots --config configs/robot_jersey_fasterrcnn_role_head_crossattn.yaml
+name: robot_jersey_fasterrcnn_role_head_crossattn_seed43
+
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+
+model:
+  architecture: fasterrcnn_robot_role
+  variant: resnet50
+  pretrained: true # ImageNet-pretrained ResNet50 backbone
+  film_hidden_dim: 256
+  conditioning_method: cross_attention
+  auxiliary_loss_weight: 1.0
+  roi_output_size: 8
+
+train:
+  epochs: 200
+  batch_size: 4
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 43
+  eval_interval: 1
+  conf_thres: 0.25
+  output_dir: outputs/robot_jersey/robot_jersey_fasterrcnn_role_head_crossattn_seed43
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  log_interval: 20
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01
