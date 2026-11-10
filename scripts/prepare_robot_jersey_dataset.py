@@ -16,7 +16,7 @@ Any number of robots per image is kept (0-robot images have nothing to
 detect here, so those are still skipped) - the renderer guarantees at
 most 2 distinct jersey colours per image regardless of robot count (a
 3+-robot scene just means some colour is shared by more than one robot),
-which is exactly what team_conditioned_detection/data/robot_jersey.py's role-assignment
+which is exactly what team_detect/data/robot_jersey.py's role-assignment
 scheme needs: group robots by colour, randomly assign one group teammate
 and the other opponent. Images that somehow violate that guarantee are
 skipped with a warning rather than silently mis-labeled.
