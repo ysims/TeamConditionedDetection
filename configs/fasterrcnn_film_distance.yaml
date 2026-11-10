@@ -1,4 +1,4 @@
-# Table 2: FiLM role head + min-over-cells colour-distance feature, Faster R-CNN.
+# FiLM role head + min-over-cells colour-distance feature, Faster R-CNN.
 #   python -m team_detect.train --config configs/fasterrcnn_film_distance.yaml --seed 42
 name: fasterrcnn_film_distance
 data:

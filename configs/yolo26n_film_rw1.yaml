@@ -1,6 +1,6 @@
-# Table 1 and 4: FiLM role head on YOLO26n.
+# FiLM role head on YOLO26n.
 # Role-loss weight 1.0 (as Faster R-CNN) instead of 0.1: tests whether the weight confounds the detector comparison. Otherwise identical to yolo26n_film.yaml.
-#   python -m team_detect.train --config configs/yolo26n_film.yaml --seed 42
+#   python -m team_detect.train --config configs/yolo26n_film_rw1.yaml --seed 42
 name: yolo26n_film_rw1
 data:
   train_manifest: data/manifest_robots/train.csv

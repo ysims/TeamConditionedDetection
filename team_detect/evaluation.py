@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paper evaluation, on the test split with the fixed teammate/opponent
+"""Evaluation on the test split with the fixed teammate/opponent
 assignment drawn from config.data.eval_seed - so every training seed, and
 the colour rules, are scored against the same labels.
 

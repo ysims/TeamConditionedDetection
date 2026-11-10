@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Training entrypoint for every model in the paper:
+"""Training entrypoint for every model:
 
     python -m team_detect.train --config configs/fasterrcnn_film.yaml --seed 43
 
 The two-stage detectors train on detection loss + role loss and are
 validated on mAP plus their val losses; the standalone classifier trains on
 role loss alone, on ground-truth boxes. Both share team_detect.engine.trainer.fit.
-scripts/run_experiments.py runs every paper experiment and seed through this.
+scripts/run_experiments.py runs every experiment and seed through this.
 """
 from __future__ import annotations
 

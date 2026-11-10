@@ -1,8 +1,7 @@
-# Dataset (large binary data, regenerate with scripts/prepare_hsl_ball_dataset.py
-# or scripts/prepare_nupbr_dataset.py)
+# Dataset (large binary data, regenerate with scripts/prepare_robot_jersey_dataset.py)
 /data/
 
-# Training run outputs (checkpoints, per-epoch metrics) - regenerate via semdetect/train.py
+# Training run outputs (checkpoints, per-epoch metrics) - regenerate via scripts/run_experiments.py or team_detect/train.py
 /outputs/
 
 # Ultralytics pretrained checkpoint downloads (model.pretrained=true) and run logs

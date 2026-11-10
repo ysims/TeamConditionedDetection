@@ -1,4 +1,4 @@
-# Table 3: standalone FiLM-conditioned classifier on raw-pixel crops of ground-truth boxes, no detector.
+# Standalone FiLM-conditioned classifier on raw-pixel crops of ground-truth boxes, no detector.
 #   python -m team_detect.train --config configs/standalone_classifier.yaml --seed 42
 name: standalone_classifier
 data:

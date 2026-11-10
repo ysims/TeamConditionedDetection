@@ -28,68 +28,78 @@ uv run python scripts/prepare_robot_jersey_dataset.py \
 
 Each robot's jersey colour is generated randomly per frame, and there is no fixed list of colours to use as a dataset partitioning mechanism. Images are partitioned randomly instead, with each image's robots kept together in one set.
 
-## Training
+## Running the experiments
 
-Configurations are stored in `configs/`, each of which defines a different training configuration for evaluation. Run using
-
-```sh
-uv run python -m team_detect.train_robots --config configs/<config_name>.yaml
-```
-
-Every run trains for up to `train.epochs` but stops early once every metric in `train.checkpoint_metric` / `train.early_stopping_metrics` hasn't improved for `train.early_stopping_patience` eval rounds (default 10 - set to `null` to disable and always run the full ceiling).
-
-Each run writes to `train.output_dir`:
-
-- `config.yaml` - the resolved config used for the run
-- `checkpoints/best.pt`, `checkpoints/last.pt`
-- `metrics/epoch_XXXX.json` - train/val losses + mAP/precision/recall per eval epoch
-- `metrics/history.csv` - the same, one row per epoch, for quick plotting
-- `metrics/final.json` - best validation score, whether/when it stopped early, and test-set metrics
-
-### Architectures
-
-Registered under `team_detect.models.registry`
-(`model.architecture` in config):
-
-| `model.architecture`         | approach                                                       | file                                               |
-| ---------------------------- | -------------------------------------------------------------- | -------------------------------------------------- |
-| `yolo_robot_role`            | two-stage: unconditioned YOLO detector + conditioned role head | `team_detect/models/robot_role.py`                 |
-| `rtdetr_robot_role`          | two-stage, RT-DETR detector                                    | `team_detect/models/robot_role.py`                 |
-| `fasterrcnn_robot_role`      | two-stage, Faster R-CNN detector                               | `team_detect/models/robot_role.py`                 |
-| `standalone_role_classifier` | role classification only, on GT/external boxes, no detector    | `team_detect/models/standalone_role_classifier.py` |
-| `yolo`                       | single-stage: whole detector conditioned                       | `team_detect/models/yolo_film.py`                  |
-| `rtdetr`                     | single-stage, RT-DETR                                          | `team_detect/models/rtdetr_film.py`                |
-| `fasterrcnn` / `fcos`        | single-stage, torchvision                                      | `team_detect/models/torchvision_film.py`           |
-
-The two-stage (`*_robot_role`) architectures exist because the single-stage approach has a diagnosed failure mode: conditioning the whole detection head means box regression is exposed to the same hard-to-learn conditioning signal as the role decision, and a swap test (same image, roles reversed) showed predictions barely changing either way. The two-stage split makes detection completely unconditioned and puts a small FiLM/cross-attention-conditioned classifier head on each detected box's RoIAlign'd feature instead - see `robot_role.py`'s module docstring for the full diagnosis.
-
-`model.conditioning_method` picks the modulation mechanism at each conditioning point - `film` (default), `cross_attention`, `conditional_batchnorm`, `conditional_layernorm`, `adain`, or `gated` - see `team_detect/models/conditioners.py`.
-
-Add another architecture by implementing the `Detector` interface (`team_detect/models/base.py`) and `@register_model("name")`; `engine/trainer.py` only depends on that interface.
-
-### Ablations
-
-- `model.use_film: false` - master switch, no conditioning at all.
-- `data.wrong_conditioning: true` - inject a random RGB pair decoupled from the actual jersey colours (ground truth stays correct); tests whether training can still reach non-trivial role accuracy without a real colour signal to learn from.
-- `model.roi_output_size` / `role_head_use_deep_feature` / `role_head_use_distance_feature` (two-stage only) - isolate whether the learned conditioned feature or the hand-crafted colour-distance feature is doing the work.
-- `model.init_checkpoint` + `model.freeze_detector` - sequential training: warm-start from a detector-only run, then freeze everything but the role head (see `configs/robot_jersey_role_head_seq_phase1.yaml` / `_phase2.yaml`).
-
-### Post-hoc analysis
+One script trains every experiment for every seed, evaluates them, and aggregates the results:
 
 ```sh
-# Nearest-colour heuristic vs. the learned role head, plus a swap test
-# scored against the original ground truth.
-uv run python scripts/evaluate_role_conditioning.py \
-    --config outputs/robot_jersey/<run>/config.yaml \
-    --checkpoint outputs/robot_jersey/<run>/checkpoints/best.pt
-
-# Swap test on GT boxes scored against the flipped label - does swapping
-# the injected colours actually flip the prediction the way it should?
-uv run python scripts/evaluate_swap_consistency.py \
-    --config outputs/robot_jersey/<run>/config.yaml \
-    --checkpoint outputs/robot_jersey/<run>/checkpoints/best.pt
-
-# Pure rule-based baseline, no trained model: classify each GT box by
-# nearest-colour distance alone.
-uv run python scripts/evaluate_colour_rule_baseline.py --manifest data/manifest_robots/test.csv
+uv run python scripts/run_experiments.py
 ```
+
+It runs three stages, each of which skips work that's already done, so an interrupted run picks up where it left off:
+
+1. **train**: each experiment and seed (42, 43, 44 by default) trains into `outputs/paper/<experiment>/seed<N>/`, with its full log in `train.log`. A run trained with a config that differs from the current one is reported as stale and is never mixed into the results. `--force` retrains it.
+2. **eval**: each run's `best.pt` is evaluated on the test set (`eval.json`), along with the non-learned colour rules (`outputs/paper/colour_rules.json`).
+3. **tables**: results are aggregated as mean ± sample standard deviation over seeds into `outputs/paper/results.json`, and summary tables are written to `--tables-dir` (default `tables/`).
+
+```sh
+uv run python scripts/run_experiments.py --stage tables                 # re-aggregate existing results
+uv run python scripts/run_experiments.py --experiments yolo26n_film --seeds 42
+```
+
+All reported metrics use the test split with one fixed teammate/opponent assignment (`data.eval_seed`), the same for every training seed:
+
+| metric | meaning |
+| --- | --- |
+| `role_acc` | role accuracy on ground-truth boxes |
+| `swap_acc` | accuracy with the teammate/opponent colours exchanged, scored against the flipped label |
+| `both_correct` | fraction of boxes correct under both contexts |
+| `cond_swap_acc` | P(swap correct \| original correct) |
+| `map_50` | mAP50 over predicted boxes and roles (detectors only) |
+| `role_params` | parameters added for role classification, excluding any shared detector |
+
+### Experiments
+
+One config per experiment, in `configs/`:
+
+| config | model |
+| --- | --- |
+| `fasterrcnn_film` | Faster R-CNN (ResNet-50-FPN) + FiLM role head |
+| `rtdetr_film` | RT-DETR-L + FiLM role head, role-loss weight 0.1 |
+| `rtdetr_film_rw1` | as `rtdetr_film`, role-loss weight 1.0 (as Faster R-CNN) |
+| `yolo26n_film` | YOLO26n + FiLM role head, role-loss weight 0.1 |
+| `yolo26n_film_rw1` | as `yolo26n_film`, role-loss weight 1.0 |
+| `fasterrcnn_film_shift` | shift-only FiLM (scale fixed at 1) |
+| `fasterrcnn_concat` | concatenation + MLP role head, parameter-matched to FiLM |
+| `fasterrcnn_film_distance` | FiLM role head + colour-distance feature |
+| `fasterrcnn_crossattn` | cross-attention role head (8 context tokens) |
+| `fasterrcnn_crossattn_distance` | cross-attention role head + colour-distance feature |
+| `standalone_classifier` | standalone FiLM-conditioned CNN on raw-pixel crops, no detector |
+
+The non-learned baselines (`team_detect/evaluation.py`) assign each ground-truth box the role whose supplied colour is closest to the box's observed colour: mean RGB or minimum RGB distance over the whole box or a centre crop, mean hue or k-means dominant colour over the torso band, and hue/HSV models calibrated on the training set to map supplied colours to their rendered appearance. Test-set accuracy is also broken down by the hue separation of the two supplied colours.
+
+Other scripts: `scripts/benchmark_latency.py` times the role heads and detectors on GPU and CPU, and `scripts/make_swap_figure.py` draws predictions on test frames under the original and swapped colour contexts.
+
+## Training a single run
+
+```sh
+uv run python -m team_detect.train --config configs/fasterrcnn_film.yaml --seed 43 --output-dir outputs/scratch
+uv run python -m team_detect.evaluation --run-dir outputs/scratch
+```
+
+Training runs for up to `train.epochs`, but stops early once every metric in `train.early_stopping_metrics` has gone `train.early_stopping_patience` validation rounds without improving. `best.pt` is selected by `train.checkpoint_metric`. Each run writes `config.yaml`, `checkpoints/{best,last}.pt`, and `metrics/` (per-epoch JSON, `history.csv`, `final.json`).
+
+## Models
+
+Every detector is two-stage: an unconditioned single-class ("robot") detector, plus a role head that RoIAligns an intermediate detector feature at each box and classifies teammate/opponent conditioned on the 6-d (teammate RGB, opponent RGB) context. Box regression never sees the context. See `team_detect/models/robot_role.py`.
+
+| `model.architecture` | role feature | file |
+| --- | --- | --- |
+| `fasterrcnn_robot_role` | finest FPN level | `team_detect/models/robot_role.py` |
+| `rtdetr_robot_role` | P3 backbone feature (layer 3), before hybrid-encoder fusion | `team_detect/models/robot_role.py` |
+| `yolo_robot_role` | P3/8 backbone feature (layer 4), before the neck | `team_detect/models/robot_role.py` |
+| `standalone_role_classifier` | its own small CNN on raw-pixel crops | `team_detect/models/standalone_role_classifier.py` |
+
+`model.conditioning_method` is `film` (channel-wise scale and shift) or `cross_attention` (spatial positions attend to 8 context-derived tokens; an additive residual only). See `team_detect/models/conditioners.py`. `model.use_distance_feature` appends the minimum RGB distance over a grid of box cells to each supplied colour.
+
+The single-stage (whole-detector-conditioned) models, the other conditioning mechanisms, and the earlier ablations were removed. They are in git history before this cleanup.

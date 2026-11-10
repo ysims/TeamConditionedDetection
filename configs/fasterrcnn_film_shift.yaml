@@ -1,4 +1,4 @@
-# Table 2: shift-only FiLM on Faster R-CNN (scale fixed at 1) - ablates FiLM's scale.
+# Shift-only FiLM on Faster R-CNN (scale fixed at 1) - ablates FiLM's scale.
 #   python -m team_detect.train --config configs/fasterrcnn_film_shift.yaml --seed 42
 name: fasterrcnn_film_shift
 data:

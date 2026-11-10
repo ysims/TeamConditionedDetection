@@ -1,5 +1,5 @@
-# Table 1 and 4: FiLM role head on YOLO26n.
-# role_loss_weight 0.1 (not Faster R-CNN's 1.0) and min_delta 0.02 match the runs the paper reports.
+# FiLM role head on YOLO26n.
+# role_loss_weight 0.1 (not Faster R-CNN's 1.0) and min_delta 0.02; the *_rw1 config is the same with weight 1.0.
 #   python -m team_detect.train --config configs/yolo26n_film.yaml --seed 42
 name: yolo26n_film
 data:
