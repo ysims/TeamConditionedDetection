@@ -1,7 +1,7 @@
-"""A genuinely standalone role classifier: no shared backbone/gradient
-with any detector at all, unlike RobotRoleDetector/FasterRCNNRobotRoleDetector's
-RoleHead (team_conditioned_detection/models/robot_role.py), which taps a hook into the
-detector's own internal feature map. This crops each box directly out of
+"""A standalone role classifier: no shared backbone/gradient with any
+detector at all, unlike the two-stage detectors' RoleHead
+(team_detect/models/robot_role.py), which taps a hook into the detector's
+own internal feature map. This crops each box directly out of
 the raw image (RoIAlign on pixels, not features), runs the crop through
 its own small dedicated CNN, and classifies from that - deployable as a
 second, independent model behind any box-producing detector, trained
@@ -13,9 +13,8 @@ cells colour feature) so the comparison between "shared-backbone role
 head" and "standalone classifier" isolates architecture (shared feature
 vs. dedicated lightweight encoder), not conditioning method.
 
-See team_conditioned_detection/train_standalone_role_classifier.py for the training loop -
-this has no detection loss/map50 concept at all, so it doesn't fit
-Detector/run_training_loop and gets its own much simpler loop.
+See team_detect/train.py for its training loop - it has no detection
+loss/map50 concept, so it doesn't implement Detector.
 """
 from __future__ import annotations
 
@@ -23,7 +22,8 @@ import torch
 import torch.nn as nn
 from torchvision.ops import roi_align
 
-from team_conditioned_detection.models.conditioners import build_conditioner
+from team_detect.models.conditioners import build_conditioner
+from team_detect.models.robot_role import min_cell_distances
 
 
 class LightweightCropEncoder(nn.Module):
@@ -85,10 +85,14 @@ class StandaloneRoleClassifier(nn.Module):
         features = [modulated.mean(dim=(2, 3))]
 
         if self.use_distance_feature:
-            teammate_rgb, opponent_rgb = per_box_embedding[:, :3], per_box_embedding[:, 3:]
-            dist_teammate = (crops - teammate_rgb[:, :, None, None]).norm(dim=1).flatten(1).min(dim=1, keepdim=True).values
-            dist_opponent = (crops - opponent_rgb[:, :, None, None]).norm(dim=1).flatten(1).min(dim=1, keepdim=True).values
-            features.append(dist_teammate)
-            features.append(dist_opponent)
+            features.extend(min_cell_distances(crops, per_box_embedding))
 
         return self.classifier(torch.cat(features, dim=-1))
+
+    @torch.no_grad()
+    def classify_roles(
+        self, images: torch.Tensor, boxes_xyxy: torch.Tensor, box_batch_idx: torch.Tensor, embeddings: torch.Tensor
+    ) -> torch.Tensor:
+        """Same signature as Detector.classify_roles, so team_detect.evaluation
+        treats this and the two-stage detectors uniformly."""
+        return self(images, boxes_xyxy, box_batch_idx, embeddings)

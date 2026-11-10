@@ -1,9 +1,12 @@
-"""Generic train/eval loop. Deliberately doesn't know anything about YOLO,
-FiLM, or the specific conditioning signal: it only talks to the
-team_conditioned_detection.models.base.Detector interface and to plain batch dicts, so a
-different architecture registered under a different name
-(team_conditioned_detection.models.registry.register_model) or a different dataset both
-plug straight in.
+"""Generic train/eval loop. Doesn't know which model is underneath: callers
+pass a train-one-epoch function and an evaluate function, so the two-stage
+detectors and the standalone classifier (see team_detect.train) share the
+same epoch loop,
+checkpointing, early stopping, and output layout:
+
+    <output_dir>/config.yaml, checkpoints/{best,last}.pt,
+    metrics/epoch_NNNN.json, metrics/history.csv, metrics/test.json,
+    metrics/final.json
 """
 from __future__ import annotations
 
@@ -11,11 +14,12 @@ import csv
 import json
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 from torch.utils.data import DataLoader
 
-from team_conditioned_detection.engine.metrics import DetectionMetrics, batch_to_targets
+from team_detect.engine.metrics import DetectionMetrics, batch_to_targets
 
 
 def move_batch(batch: dict, device: str) -> dict:
@@ -23,6 +27,7 @@ def move_batch(batch: dict, device: str) -> dict:
 
 
 def train_one_epoch(model, loader: DataLoader, optimizer, device: str, log_interval: int, epoch: int) -> dict[str, float]:
+    """For any model with compute_loss(batch) -> (loss, {name: value})."""
     model.train()
     totals: dict[str, float] = {}
     n_batches = 0
@@ -42,14 +47,15 @@ def train_one_epoch(model, loader: DataLoader, optimizer, device: str, log_inter
             comps = " ".join(f"{k}={v:.4f}" for k, v in loss_dict.items())
             print(f"  epoch {epoch} step {step}/{len(loader)} {comps}")
 
-    elapsed = time.time() - t0
     avg = {k: v / max(n_batches, 1) for k, v in totals.items()}
-    avg["epoch_time_sec"] = elapsed
+    avg["epoch_time_sec"] = time.time() - t0
     return avg
 
 
 @torch.no_grad()
-def evaluate(model, loader: DataLoader, device: str, img_size: int, class_names: list[str], conf_thres: float) -> dict[str, float]:
+def evaluate_detector(model, loader: DataLoader, device: str, img_size: int, class_names: list[str], conf_thres: float) -> dict[str, float]:
+    """mAP/P/R/F1 over predict()'s output, plus every compute_loss component
+    averaged over batches (the val losses early stopping watches)."""
     model.eval()
     metrics = DetectionMetrics(class_names, iou_thres=0.5, conf_thres=conf_thres)
     loss_totals: dict[str, float] = {}
@@ -57,23 +63,9 @@ def evaluate(model, loader: DataLoader, device: str, img_size: int, class_names:
     for batch in loader:
         batch = move_batch(batch, device)
         preds = model.predict(batch["img"], batch.get("embedding"), conf_thres=conf_thres)
-        targets = batch_to_targets(batch, img_size)
-        metrics.update(preds, targets)
-        # A second forward pass (predict() already did one) - compute_loss
-        # needs GT in the batch and runs its own forward internally (see
-        # Detector.compute_loss's docstring), so it can't reuse predict()'s
-        # pass. Worth the cost: unlike map_50 (thresholded - can sit at a
-        # hard 0.0 for many epochs even while the model is genuinely
-        # improving, e.g. early in a from-scratch multi-instance/multi-class
-        # run before any prediction clears the IoU/confidence bar), loss is
-        # smooth and never floors out, so it's the more reliable early-
-        # stopping/checkpoint-selection signal when map is sparse - see
-        # TrainConfig.checkpoint_metric_mode. Every component of loss_dict
-        # (not just the total) is kept, not just for visibility - a
-        # detector with several component losses that converge at
-        # different rates (e.g. robot_role.py's detection_loss + role_loss)
-        # needs each one individually watchable by early stopping, see
-        # TrainConfig.early_stopping_metrics.
+        metrics.update(preds, batch_to_targets(batch, img_size))
+        # A second forward pass - compute_loss needs GT during its own forward
+        # (see Detector.compute_loss), so it can't reuse predict()'s pass.
         _, loss_dict = model.compute_loss(batch)
         for k, v in loss_dict.items():
             loss_totals[k] = loss_totals.get(k, 0.0) + v
@@ -94,87 +86,102 @@ def build_optimizer(model, config):
     raise ValueError(f"Unknown optimizer '{config.train.optimizer}'")
 
 
-def run_training_loop(
+class EarlyStopping:
+    """Tracks the checkpoint metric (which decides best.pt) and, separately,
+    every early_stopping_metrics entry - training stops only once all of
+    those have gone `patience` evals without improving by min_delta.
+    """
+
+    def __init__(self, train_config):
+        self.metric = train_config.checkpoint_metric
+        self.mode = train_config.checkpoint_metric_mode
+        if self.mode not in ("max", "min"):
+            raise ValueError(f"Unknown checkpoint_metric_mode {self.mode!r} (expected 'max' or 'min')")
+        self.patience = train_config.early_stopping_patience
+        self.min_delta = train_config.early_stopping_min_delta
+        self.best_score = self._worst(self.mode)
+
+        names = train_config.early_stopping_metrics or [self.metric]
+        modes = train_config.early_stopping_modes or [self.mode] * len(names)
+        if len(modes) != len(names):
+            raise ValueError(f"early_stopping_modes (len {len(modes)}) must match early_stopping_metrics (len {len(names)})")
+        self.watch_modes = dict(zip(names, modes))
+        self.watch_best = {n: self._worst(m) for n, m in self.watch_modes.items()}
+        self.evals_without_improvement = {n: 0 for n in names}
+
+    @staticmethod
+    def _worst(mode: str) -> float:
+        return float("-inf") if mode == "max" else float("inf")
+
+    def _improved(self, score: float, best: float, mode: str) -> bool:
+        return score > best + self.min_delta if mode == "max" else score < best - self.min_delta
+
+    def update(self, val_metrics: dict[str, float]) -> bool:
+        """Returns True if the checkpoint metric improved (save best.pt)."""
+        score = val_metrics.get(self.metric, 0.0)
+        improved = self._improved(score, self.best_score, self.mode)
+        if improved:
+            self.best_score = score
+        for name, mode in self.watch_modes.items():
+            s = val_metrics.get(name, 0.0)
+            if self._improved(s, self.watch_best[name], mode):
+                self.watch_best[name] = s
+                self.evals_without_improvement[name] = 0
+            else:
+                self.evals_without_improvement[name] += 1
+        status = ", ".join(f"{n}={c}/{self.patience}" for n, c in self.evals_without_improvement.items())
+        print(f"{self.metric}={score:.4f} (best so far {self.best_score:.4f})" + ("" if self.patience is None else f" [{status}]"))
+        return improved
+
+    @property
+    def should_stop(self) -> bool:
+        return self.patience is not None and all(c >= self.patience for c in self.evals_without_improvement.values())
+
+
+def fit(
     model,
-    optimizer,
-    train_loader: DataLoader,
+    train_epoch_fn: Callable[[int], dict[str, float]],
+    eval_fn: Callable[[DataLoader], dict[str, float]],
     val_loader: DataLoader,
     test_loader: DataLoader | None,
     train_config,
-    img_size: int,
-    class_names: list[str],
     output_dir: Path,
     device: str,
-) -> dict[str, float]:
-    """The epoch loop, checkpointing, early stopping, and final test eval -
-    identical regardless of what dataset/embedding feeds the model, so
-    team_conditioned_detection.train_robots's run_robot_training (jersey-colour
-    conditioning) calls this directly rather than duplicating it.
+) -> dict:
+    """train_epoch_fn(epoch) trains one epoch and returns its metrics;
+    eval_fn(loader) evaluates the model on a loader. Saves best.pt by the
+    checkpoint metric, stops early, then evaluates best.pt on test_loader.
     """
-    history_path = output_dir / "metrics" / "history.csv"
+    (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (output_dir / "metrics").mkdir(parents=True, exist_ok=True)
     history_rows: list[dict] = []
-    best_metric_name = train_config.checkpoint_metric
-    metric_mode = train_config.checkpoint_metric_mode
-    if metric_mode not in ("max", "min"):
-        raise ValueError(f"Unknown checkpoint_metric_mode {metric_mode!r} (expected 'max' or 'min')")
-    best_score = float("-inf") if metric_mode == "max" else float("inf")
-    patience = train_config.early_stopping_patience
-    min_delta = train_config.early_stopping_min_delta
+    stopper = EarlyStopping(train_config)
     stopped_early_at = None
 
-    # Checkpointing ("what's the best model so far") always uses the single
-    # checkpoint_metric - keeps "best.pt" well-defined. Early stopping can
-    # watch a wider set independently (early_stopping_metrics) so a
-    # metric that's still improving isn't dragged down by one that's
-    # plateaued inside the same combined total - see TrainConfig docstring.
-    early_stop_names = train_config.early_stopping_metrics or [best_metric_name]
-    early_stop_modes_list = train_config.early_stopping_modes or [metric_mode] * len(early_stop_names)
-    if len(early_stop_modes_list) != len(early_stop_names):
-        raise ValueError(f"early_stopping_modes (len {len(early_stop_modes_list)}) must match early_stopping_metrics (len {len(early_stop_names)})")
-    early_stop_modes = dict(zip(early_stop_names, early_stop_modes_list))
-    best_early_stop_scores = {name: (float("-inf") if early_stop_modes[name] == "max" else float("inf")) for name in early_stop_names}
-    evals_without_improvement = {name: 0 for name in early_stop_names}
-
     for epoch in range(1, train_config.epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device, train_config.log_interval, epoch)
-
+        train_metrics = train_epoch_fn(epoch)
         row = {"epoch": epoch, **{f"train_{k}": v for k, v in train_metrics.items()}}
 
         if epoch % train_config.eval_interval == 0 or epoch == train_config.epochs:
-            val_metrics = evaluate(model, val_loader, device, img_size, class_names, train_config.conf_thres)
+            val_metrics = eval_fn(val_loader)
             row.update({f"val_{k}": v for k, v in val_metrics.items()})
             with open(output_dir / "metrics" / f"epoch_{epoch:04d}.json", "w") as f:
                 json.dump({"epoch": epoch, "train": train_metrics, "val": val_metrics}, f, indent=2)
-
-            score = val_metrics.get(best_metric_name, 0.0)
-            improved = score > best_score + min_delta if metric_mode == "max" else score < best_score - min_delta
-            if improved:
-                best_score = score
-                torch.save({"model": model.state_dict(), "config": row}, output_dir / "checkpoints" / "best.pt")
-
-            for name in early_stop_names:
-                s = val_metrics.get(name, 0.0)
-                s_improved = s > best_early_stop_scores[name] + min_delta if early_stop_modes[name] == "max" else s < best_early_stop_scores[name] - min_delta
-                if s_improved:
-                    best_early_stop_scores[name] = s
-                    evals_without_improvement[name] = 0
-                else:
-                    evals_without_improvement[name] += 1
-
-            watch_status = ", ".join(f"{n}={evals_without_improvement[n]}/{patience}" for n in early_stop_names)
-            print(f"epoch {epoch}: {best_metric_name}={score:.4f} (best so far {best_score:.4f})" + ("" if patience is None else f" [{watch_status}]"))
+            print(f"epoch {epoch}: ", end="")
+            if stopper.update(val_metrics):
+                torch.save({"model": model.state_dict(), "epoch": epoch}, output_dir / "checkpoints" / "best.pt")
 
         history_rows.append(row)
         torch.save({"model": model.state_dict(), "epoch": epoch}, output_dir / "checkpoints" / "last.pt")
-        _write_history_csv(history_path, history_rows)
+        _write_history_csv(output_dir / "metrics" / "history.csv", history_rows)
 
-        if patience is not None and all(v >= patience for v in evals_without_improvement.values()):
+        if stopper.should_stop:
             stopped_early_at = epoch
-            print(f"Early stopping: no improvement in any of {early_stop_names} for {patience} eval(s), stopping at epoch {epoch}")
+            print(f"Early stopping: no improvement in any of {list(stopper.watch_modes)} for {stopper.patience} eval(s), stopping at epoch {epoch}")
             break
 
     final_summary = {
-        "best_" + best_metric_name: best_score,
+        "best_" + stopper.metric: stopper.best_score,
         "epochs_configured": train_config.epochs,
         "epochs_run": stopped_early_at or train_config.epochs,
         "stopped_early": stopped_early_at is not None,
@@ -184,15 +191,15 @@ def run_training_loop(
         best_ckpt = output_dir / "checkpoints" / "best.pt"
         if best_ckpt.exists():
             model.load_state_dict(torch.load(best_ckpt, map_location=device)["model"])
-        test_metrics = evaluate(model, test_loader, device, img_size, class_names, train_config.conf_thres)
+        test_metrics = eval_fn(test_loader)
         with open(output_dir / "metrics" / "test.json", "w") as f:
             json.dump(test_metrics, f, indent=2)
         final_summary["test"] = test_metrics
-        print(f"Test set ({best_metric_name}={test_metrics.get(best_metric_name, 0.0):.4f}): {test_metrics}")
+        print(f"Test set: {test_metrics}")
 
     with open(output_dir / "metrics" / "final.json", "w") as f:
         json.dump(final_summary, f, indent=2)
-    print(f"Training complete. best {best_metric_name}={best_score:.4f}. Outputs in {output_dir}")
+    print(f"Training complete. best {stopper.metric}={stopper.best_score:.4f}. Outputs in {output_dir}")
     return final_summary
 
 

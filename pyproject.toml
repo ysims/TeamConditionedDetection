@@ -23,7 +23,6 @@ dependencies = [
 
 [tool.uv]
 # Application, not a library: manage the venv/deps but don't build/install
-# team_conditioned_detection itself as a wheel. `python -m
-# team_conditioned_detection.train_robots` relies on the repo root being
-# on sys.path, same as before.
+# the package itself as a wheel. `python -m team_detect.train` relies on
+# the repo root being on sys.path.
 package = false

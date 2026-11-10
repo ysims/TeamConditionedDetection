@@ -1,12 +1,10 @@
 """Multi-instance robot detection with per-role jersey-colour conditioning.
 
-Unlike the ball dataset (one object per image, one fixed text description
-per instance), each image here has one or more robots, each with its own
-per-frame-random jersey colour (see meta yaml: `robots: [{id, jersey_colour,
-bbox}, ...]` - "id" is just a scene-slot label, not a persistent identity:
-the same slot gets a different random colour every frame it appears in, so
-unlike ball descriptions there's no fixed colour vocabulary to hold out
-across train/val/test - see scripts/prepare_robot_jersey_dataset.py, which
+Each image has one or more robots, each with its own per-frame-random
+jersey colour (see meta yaml: `robots: [{id, jersey_colour, bbox}, ...]` -
+"id" is just a scene-slot label, not a persistent identity: the same slot
+gets a different random colour every frame it appears in, so there's no
+fixed colour vocabulary to hold out across train/val/test - see scripts/prepare_robot_jersey_dataset.py, which
 partitions images randomly instead). The renderer guarantees at most 2
 distinct jersey colours per image regardless of robot count (a 3+-robot
 image just means some colour is shared by more than one robot) - see
@@ -14,9 +12,8 @@ prepare_robot_jersey_dataset.py's MAX_DISTINCT_COLOURS check.
 
 The conditioning signal is two RGB triplets - a "teammate colour" and an
 "opponent colour" - concatenated into one 6-dim vector fed straight into
-FiLM (whose own MLP, see film.py's FiLMGenerator, does the "colour pair ->
-hidden -> gamma/beta" mapping; no separate embedder class needed the way
-CLIP/BERT/E5 needed one for text).
+the role head's conditioner (whose own MLP, see film.py's FiLMGenerator,
+does the "colour pair -> hidden -> gamma/beta" mapping).
 
 Ground truth label for each robot in the image is whichever role's colour
 matches that robot's actual jersey colour:
@@ -39,10 +36,11 @@ blue, another time it sees image A the opponent might be blue and the
 teammate red" (this is the whole point: prevent the model from learning
 any position/robot-index shortcut and force it to actually key off the
 conditioning colour). Validation/test use a *fixed* assignment instead,
-drawn once at construction and cached - re-randomizing there too would
-make epoch-to-epoch val metrics partly reflect which random assignment
-got drawn rather than real model improvement, exactly the kind of noise
-this project's multi-seed methodology has otherwise been built to avoid.
+drawn once at construction from `seed` and cached - re-randomizing there
+too would make epoch-to-epoch val metrics partly reflect which random
+assignment got drawn rather than real model improvement. Callers pass
+config.data.eval_seed here, independent of the training seed, so every
+training seed is evaluated against the same labels.
 """
 from __future__ import annotations
 
@@ -51,9 +49,9 @@ import random
 
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
-from team_conditioned_detection.data.transforms import letterbox, maybe_hflip_boxes, to_chw_float, transform_bbox_xyxy, xyxy_to_norm_cxcywh
+from team_detect.data.transforms import letterbox, maybe_hflip_boxes, to_chw_float, transform_bbox_xyxy, xyxy_to_norm_cxcywh
 
 ROLE_NAMES = ["teammate", "opponent"]  # index = class label
 EMBED_DIM = 3 * len(ROLE_NAMES)  # RGB per role, concatenated
@@ -96,20 +94,12 @@ class RobotJerseyDataset(Dataset):
         hflip_prob: float = 0.5,
         randomize_roles: bool = True,
         seed: int = 0,
-        wrong_conditioning: bool = False,
     ):
         self.images = load_robot_manifest(manifest_path)
         self.img_size = img_size
         self.augment = augment
         self.hflip_prob = hflip_prob
         self.randomize_roles = randomize_roles
-        # Ablation only - only takes effect together with randomize_roles
-        # (i.e. only on the split actually being trained on). Deliberately
-        # NOT applied when randomize_roles=False (val/test): the point is
-        # to measure whether a model trained on uninformative conditioning
-        # still ends up USING real conditioning when it's given real
-        # conditioning at eval time, not to also corrupt the eval signal.
-        self.wrong_conditioning = wrong_conditioning
         self._aug_rng = random.Random(seed)
 
         # Val/test: one fixed role assignment per image, drawn once here
@@ -159,13 +149,6 @@ class RobotJerseyDataset(Dataset):
             opponent_rgb = distractor if first_is_teammate else real_rgb
             labels = [0 if first_is_teammate else 1] * len(robots)
 
-        if self.wrong_conditioning and self.randomize_roles:
-            # Ground truth (labels) stays correct - only the injected
-            # colours become pure noise, unrelated to what's actually
-            # visible. See __init__'s docstring.
-            teammate_rgb = (random.random(), random.random(), random.random())
-            opponent_rgb = (random.random(), random.random(), random.random())
-
         bboxes_norm = [xyxy_to_norm_cxcywh(b, self.img_size) for b in bboxes]
         image_tensor = torch.from_numpy(to_chw_float(canvas))
         embedding = torch.tensor([*teammate_rgb, *opponent_rgb], dtype=torch.float32)
@@ -175,10 +158,7 @@ class RobotJerseyDataset(Dataset):
             "bboxes": torch.tensor(bboxes_norm, dtype=torch.float32),
             "labels": torch.tensor(labels, dtype=torch.long),
             # Single unconditioned "robot" class, same count as labels -
-            # only team_conditioned_detection.models.robot_role's two-stage detector uses
-            # this (its own box/objectness loss target); single-stage
-            # detectors (FiLM/cross-attention/baseline) use "labels" above
-            # directly and ignore this field.
+            # the two-stage detectors' own box/objectness loss target.
             "detection_labels": torch.zeros(len(labels), dtype=torch.long),
             "embedding": embedding,
             "image_path": robots[0]["image_path"],
@@ -203,3 +183,31 @@ def robot_collate_fn(batch: list[dict]) -> dict:
         "embedding": torch.stack([b["embedding"] for b in batch]),
         "image_paths": [b["image_path"] for b in batch],
     }
+
+
+def build_dataloader(config, split: str, batch_size: int | None = None) -> DataLoader:
+    """config: a team_detect.robot_config.RobotConfig. Training gets
+    re-randomised role assignments and augmentation; val/test get the fixed
+    assignment drawn from config.data.eval_seed (see module docstring).
+    """
+    manifest = {"train": config.data.train_manifest, "val": config.data.val_manifest, "test": config.data.test_manifest}[split]
+    is_train = split == "train"
+    dataset = RobotJerseyDataset(
+        manifest_path=manifest,
+        img_size=config.data.img_size,
+        augment=config.data.augment and is_train,
+        randomize_roles=is_train,
+        seed=config.train.seed if is_train else config.data.eval_seed,
+    )
+    num_workers = config.data.num_workers
+    return DataLoader(
+        dataset,
+        batch_size=batch_size or config.train.batch_size,
+        shuffle=is_train,
+        num_workers=num_workers,
+        collate_fn=robot_collate_fn,
+        drop_last=is_train,
+        persistent_workers=num_workers > 0,
+        timeout=180 if num_workers > 0 else 0,
+        worker_init_fn=worker_init_fn if num_workers > 0 else None,
+    )

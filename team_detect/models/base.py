@@ -24,7 +24,7 @@ class Detector(nn.Module, ABC):
     def compute_loss(self, batch: dict) -> tuple[torch.Tensor, dict[str, float]]:
         """Runs its own forward pass and returns (total_loss, {loss_name:
         value}) for logging. `batch` is the collated dict from
-        team_conditioned_detection.data.dataset.collate_fn (at least "img", "cls",
+        team_detect.data.robot_jersey.robot_collate_fn (at least "img", "cls",
         "bboxes", "batch_idx", and "embedding" if the model uses FiLM),
         already moved to the model's device.
         """
@@ -37,4 +37,13 @@ class Detector(nn.Module, ABC):
         """Returns one dict per image: {"boxes": (N,4) xyxy pixel coords in
         the input image's own coordinate frame, "scores": (N,), "labels":
         (N,)}. This is the torchmetrics MeanAveragePrecision input format.
+        """
+
+    @abstractmethod
+    @torch.no_grad()
+    def classify_roles(
+        self, images: torch.Tensor, boxes_xyxy: torch.Tensor, box_batch_idx: torch.Tensor, embeddings: torch.Tensor
+    ) -> torch.Tensor:
+        """Role logits (N,2) for supplied boxes (N,4 xyxy pixel coords),
+        bypassing detection - used for ground-truth-box role accuracy.
         """

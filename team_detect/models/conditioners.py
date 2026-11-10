@@ -1,39 +1,26 @@
-"""Alternative mechanisms for injecting a semantic embedding into a
-feature map, alongside FiLM (film.py). All share one interface so the
-hook infrastructure in ultralytics_base.py doesn't need to know which
-mechanism it's driving - only `conditioning_method` in config changes.
+"""Mechanisms for injecting the (teammate_rgb, opponent_rgb) context vector
+into a role head's RoI feature. Both share one interface so RoleHead and
+StandaloneRoleClassifier don't need to know which one they're driving -
+only `model.conditioning_method` in config changes.
 
     Conditioner.forward(feature_map, embedding) -> feature_map'
 
-    film                    - FiLMGenerator + apply_film (film.py), the
-                              baseline mechanism this repo started with.
-    cross_attention         - spatial positions attend to a single text
-                              token (nn.MultiheadAttention), added back
-                              as a residual.
-    conditional_batchnorm,
-    conditional_layernorm,
-    adain                   - ConditionalNormConditioner parameterized by
-                              which statistics normalize the feature map
-                              (batch / channel-wise-per-position / per-
-                              instance-per-channel) before a FiLM-style
-                              predicted affine is applied - the textbook
-                              distinction between these three techniques
-                              and plain FiLM is exactly "normalize first,
-                              using these statistics, THEN modulate" vs.
-                              FiLM's "modulate the raw feature directly."
-    gated                   - a single learned per-channel gate in [0, 1]
-                              (sigmoid), multiplicative only, no additive
-                              shift - tests whether FiLM's beta term (an
-                              unrestricted shift) is doing anything beyond
-                              what a bounded multiplicative gate could.
+    film            - FiLMGenerator + apply_film (film.py): channel-wise
+                      scale and shift predicted from the context.
+    film_shift      - FiLM with the scale fixed at 1: a context-predicted
+                      channel-wise shift only. Ablates what FiLM's scale
+                      contributes - see FiLMShiftConditioner's docstring.
+    cross_attention - spatial positions attend to num_tokens context-derived
+                      key/value tokens (nn.MultiheadAttention), added back
+                      as a zero-initialised residual. Additive only - see
+                      CrossAttentionConditioner's docstring.
 
-Every mechanism here defaults to a near-identity start at initialization
-(matching FiLMGenerator's own zero-init trick, see film.py) EXCEPT the
-conditional-norm family: inserting a normalization layer that wasn't
-there before necessarily perturbs feature statistics from the first
-forward pass, regardless of how its affine is initialized - that's an
-inherent property of retrofitting normalization into an already-designed
-architecture, not a bug to engineer around.
+All start as the identity at initialization (zero-initialised final
+layers, CrossAttentionConditioner's zero residual scale).
+
+RoleHead also accepts conditioning_method "concat", which has no
+conditioner: it concatenates the pooled feature with the context and
+classifies with an MLP (see RoleHead).
 """
 from __future__ import annotations
 
@@ -41,9 +28,8 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from team_conditioned_detection.models.film import FiLMGenerator, apply_film
+from team_detect.models.film import FiLMGenerator, apply_film
 
 
 class Conditioner(nn.Module, ABC):
@@ -51,19 +37,9 @@ class Conditioner(nn.Module, ABC):
     def forward(self, feature_map: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
         """embedding: (B, embed_dim). Returns a feature map of the same shape."""
 
-    def pop_auxiliary_loss(self) -> torch.Tensor | None:
-        """Returns and clears any loss term accumulated by forward() calls
-        since the last pop - None for mechanisms with no auxiliary loss
-        (all current mechanisms; this is an extension point for a future
-        one that trains via a side loss rather than forward-pass
-        modulation, as shared_embedding briefly did before it was dropped -
-        see git history if reviving that idea).
-        """
-        return None
-
 
 class FiLMConditioner(Conditioner):
-    def __init__(self, embed_dim: int, channels: int, hidden_dim: int = 256, **_):
+    def __init__(self, embed_dim: int, channels: int, hidden_dim: int = 256):
         super().__init__()
         self.generator = FiLMGenerator(embed_dim, channels, hidden_dim=hidden_dim)
 
@@ -72,27 +48,45 @@ class FiLMConditioner(Conditioner):
         return apply_film(feature_map, gamma, beta)
 
 
-class CrossAttentionConditioner(Conditioner):
-    """The text embedding is projected into `num_tokens` learned key/value
-    tokens; every spatial position in the feature map attends to them as a
-    query. The attention output is added back as a residual (scaled by a
-    zero-initialized learnable scalar, so training starts identical to no
-    conditioning).
-
-    num_tokens must be > 1: with a single K/V token, softmax over one
-    element is always exactly 1.0 regardless of the query, so the "attention"
-    degenerates to a constant broadcast of the value token to every spatial
-    position - content-independent, strictly less expressive than FiLM (no
-    multiplicative term at all), while carrying more parameters whose query
-    path is entirely wasted. Confirmed empirically: with num_tokens=1, 50
-    wildly different query vectors produced bit-identical output. Multiple
-    tokens (all still derived from the same text embedding, via one shared
-    projection reshaped into num_tokens vectors) give the softmax something
-    real to discriminate between, so different spatial positions can attend
-    differently depending on their own content.
+class FiLMShiftConditioner(Conditioner):
+    """x + beta(c), no scale. RoleHead spatially averages and then applies a
+    linear classifier, so this makes the role logits W mean(x) + W beta(c):
+    a visual term plus a context term, with no interaction between them.
+    It can't represent "the jersey matches the teammate colour" - the
+    ablation shows what FiLM's multiplicative term contributes.
     """
 
-    def __init__(self, embed_dim: int, channels: int, hidden_dim: int = 256, num_heads: int = 4, num_tokens: int = 8, **_):
+    def __init__(self, embed_dim: int, channels: int, hidden_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(embed_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, channels))
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, feature_map: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
+        return feature_map + self.net(embedding.to(feature_map.dtype))[:, :, None, None]
+
+
+class CrossAttentionConditioner(Conditioner):
+    """The context embedding is mapped by a two-layer MLP to `num_tokens`
+    key/value tokens; every spatial position in the feature map attends to
+    them as a query. The attention output is added back as a residual
+    (scaled by a zero-initialized learnable scalar, so training starts
+    identical to no conditioning).
+
+    The tokens depend only on the context, so each position receives an
+    additive update drawn from a context-dependent set of vectors, with the
+    visual content choosing only the softmax mixing weights - the feature
+    map itself is never multiplicatively modulated, unlike FiLM.
+
+    num_tokens must be > 1: with a single K/V token, softmax over one
+    element is always exactly 1.0 regardless of the query, so the
+    "attention" degenerates to a constant broadcast of the value token to
+    every spatial position - after spatial pooling and a linear classifier,
+    a context-dependent bias with no interaction with the visual feature
+    at all.
+    """
+
+    def __init__(self, embed_dim: int, channels: int, hidden_dim: int = 256, num_heads: int = 4, num_tokens: int = 8):
         super().__init__()
         if num_tokens < 2:
             raise ValueError(f"num_tokens={num_tokens} degenerates attention to a constant broadcast - see class docstring")
@@ -115,86 +109,10 @@ class CrossAttentionConditioner(Conditioner):
         return feature_map + self.residual_scale * attn_out
 
 
-class LayerNorm2d(nn.Module):
-    """Channel-wise LayerNorm for (B, C, H, W): normalizes over the
-    channel dim independently at each spatial position (the ConvNeXt-style
-    "LayerNorm2d", distinct from GroupNorm(1, C) which pools spatial dims
-    in too). No affine - ConditionalNormConditioner supplies that.
-    """
-
-    def __init__(self, channels: int, eps: float = 1e-5, **_):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mean = x.mean(dim=1, keepdim=True)
-        var = x.var(dim=1, keepdim=True, unbiased=False)
-        return (x - mean) / torch.sqrt(var + self.eps)
-
-
-class ConditionalNormConditioner(Conditioner):
-    """Normalize (no affine) using norm_type's statistics, then apply a
-    FiLM-style predicted affine on the *normalized* feature - this is the
-    actual technical distinction between plain FiLM (modulates the raw
-    feature) and conditional Batch/Layer/Instance(=AdaIN) norm.
-
-        norm_type="batch"    -> nn.BatchNorm2d(affine=False): per-channel
-                                 statistics over (batch, H, W).
-        norm_type="layer"    -> LayerNorm2d above: per-position statistics
-                                 over channels only.
-        norm_type="instance" -> nn.InstanceNorm2d(affine=False): AdaIN's
-                                 own normalization step - per-sample,
-                                 per-channel statistics over (H, W).
-    """
-
-    def __init__(self, embed_dim: int, channels: int, hidden_dim: int = 256, norm_type: str = "batch", **_):
-        super().__init__()
-        if norm_type == "batch":
-            self.norm = nn.BatchNorm2d(channels, affine=False)
-        elif norm_type == "instance":
-            self.norm = nn.InstanceNorm2d(channels, affine=False)
-        elif norm_type == "layer":
-            self.norm = LayerNorm2d(channels)
-        else:
-            raise ValueError(f"Unknown norm_type {norm_type!r} (expected batch/instance/layer)")
-        self.norm_type = norm_type
-        self.generator = FiLMGenerator(embed_dim, channels, hidden_dim=hidden_dim)
-
-    def forward(self, feature_map: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
-        normalized = self.norm(feature_map)
-        gamma, beta = self.generator(embedding.to(feature_map.dtype))
-        return apply_film(normalized, gamma, beta)
-
-
-class GatedConditioner(Conditioner):
-    """A single learned per-channel gate in (0, 1) (sigmoid), multiplicative
-    only - no additive shift. The bias is initialized high (not zero) so
-    the gate starts near 1 (identity-ish); sigmoid can't reach exactly 1.0
-    from a zero-init logit the way FiLM's unrestricted gamma can reach
-    exactly 1, so this needed a different init to match the "start near
-    identity" convention the rest of this module follows.
-    """
-
-    def __init__(self, embed_dim: int, channels: int, hidden_dim: int = 256, **_):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, channels)
-        )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.constant_(self.net[-1].bias, 4.0)  # sigmoid(4) ~= 0.982
-
-    def forward(self, feature_map: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
-        gate = torch.sigmoid(self.net(embedding.to(feature_map.dtype)))
-        return feature_map * gate[:, :, None, None]
-
-
 _BUILDERS = {
-    "film": lambda **kw: FiLMConditioner(**kw),
-    "cross_attention": lambda **kw: CrossAttentionConditioner(**kw),
-    "conditional_batchnorm": lambda **kw: ConditionalNormConditioner(norm_type="batch", **kw),
-    "conditional_layernorm": lambda **kw: ConditionalNormConditioner(norm_type="layer", **kw),
-    "adain": lambda **kw: ConditionalNormConditioner(norm_type="instance", **kw),
-    "gated": lambda **kw: GatedConditioner(**kw),
+    "film": FiLMConditioner,
+    "film_shift": FiLMShiftConditioner,
+    "cross_attention": CrossAttentionConditioner,
 }
 
 

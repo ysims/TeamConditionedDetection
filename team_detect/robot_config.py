@@ -1,13 +1,12 @@
-"""Config schema for the robot jersey-colour conditioning experiment.
+"""Config schema for the robot jersey-colour role experiments.
 
-The embedding here is a fixed-size (teammate_rgb, opponent_rgb) pair
+The conditioning signal is a fixed-size (teammate_rgb, opponent_rgb) pair
 computed straight from the manifest at data-loading time (see
-team_conditioned_detection.data.robot_jersey), not a frozen external text embedder, so
-there's no EmbeddingConfig/provider/centering concept needed.
+team_detect.data.robot_jersey).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_type_hints
 
@@ -16,134 +15,131 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    # Registry key, see team_conditioned_detection.models.registry: "yolo", "rtdetr",
-    # "fasterrcnn", or "fcos". The training loop only depends on the
-    # Detector interface (see team_conditioned_detection/models/base.py).
-    architecture: str = "yolo"
-    # Meaning depends on architecture: an Ultralytics detection yaml stem
-    # for "yolo" (e.g. "yolo26n", "yolo11n", "yolov8n") or "rtdetr" (e.g.
-    # "rtdetr-l"); a torchvision backbone name for "fasterrcnn"/"fcos"
-    # (e.g. "resnet50", "mobilenet_v3_large" - fasterrcnn only).
-    variant: str = "yolo26n"
-    pretrained: bool = False
-    # Master switch for the whole feature this repo exists to test: with
-    # use_film=False the conditioning signal is computed but never
-    # touches the network, giving a true apples-to-apples baseline.
-    use_film: bool = True
-    film_hidden_dim: int = 256
-    # "yolo"/"rtdetr" only: which layer indices (into the Ultralytics
-    # model's internal nn.Sequential) get FiLM-modulated. None = auto: the
-    # exact layers feeding the detection head (late - after backbone+neck
-    # fusion). Pass explicit indices to condition on raw backbone features
-    # instead (early - before cross-scale fusion); see the architecture's
-    # module docstring for its layer-by-layer map. Ignored when use_film
-    # is False or architecture is "fasterrcnn"/"fcos" (see film_early).
-    film_layer_indices: list[int] | None = None
-    # "fasterrcnn"/"fcos" only: False (default) = FiLM on the FPN outputs
-    # feeding the head (late, uniform 256ch). True = FiLM on the backbone
-    # body's per-stage outputs before the FPN fuses them (early).
-    film_early: bool = False
-    # "yolo"/"rtdetr" only: which mechanism generates the modulation at
-    # each film_layer_indices - "film" (default), "cross_attention",
-    # "conditional_batchnorm", "conditional_layernorm", "adain", or
-    # "gated". All share the same injection points and hook mechanics -
-    # see team_conditioned_detection/models/conditioners.py.
+    # See team_detect.models.factory: "fasterrcnn_robot_role",
+    # "rtdetr_robot_role", "yolo_robot_role", or "standalone_role_classifier".
+    architecture: str = "fasterrcnn_robot_role"
+    # An Ultralytics yaml stem for yolo/rtdetr (e.g. "yolo26n", "rtdetr-l");
+    # a torchvision backbone name for fasterrcnn ("resnet50"). Unused by the
+    # standalone classifier.
+    variant: str = "resnet50"
+    # Start from pretrained detection weights (COCO for Ultralytics, an
+    # ImageNet backbone for Faster R-CNN).
+    pretrained: bool = True
+    # "film", "film_shift" or "cross_attention" - see team_detect.models.conditioners -
+    # or "concat" (role-head detectors only; see RoleHead).
     conditioning_method: str = "film"
-    # Weight on any conditioner's auxiliary loss, added to the detection
-    # loss when a conditioner's pop_auxiliary_loss() returns non-None (no
-    # current mechanism does; see Conditioner.pop_auxiliary_loss docstring).
-    # Also reused by team_conditioned_detection.models.robot_role's two-stage detectors as
-    # the role-classification loss weight (same idea: a secondary loss on
-    # top of detection) - set to 0.0 there for detector-only warm-start
-    # training, see robot_jersey_role_head_seq_phase1.yaml.
-    auxiliary_loss_weight: float = 0.1
-    # team_conditioned_detection.models.robot_role only: load a previous run's full
-    # state_dict before training starts (e.g. a detector-only warm-start
-    # checkpoint - see freeze_detector below). None = random init.
-    init_checkpoint: str | None = None
-    # team_conditioned_detection.models.robot_role only: freeze detector.* parameters after
-    # construction/init_checkpoint loading, so the optimizer (which only
-    # ever collects params with requires_grad=True, see
-    # engine/trainer.py's build_optimizer) only trains the role head -
-    # for sequential training (detector converges first, then the role
-    # head trains on top of frozen, already-good detection features).
-    freeze_detector: bool = False
-    # team_conditioned_detection.models.robot_role only: spatial resolution of the RoIAlign
-    # crop the role head pools from (both the conditioned deep feature and
-    # the raw-pixel colour-distance feature). A jersey typically covers
-    # only a small torso patch of a robot's full bounding box (confirmed
-    # visually) - too coarse a grid blends that patch into the
-    # surrounding grey/dark chassis before the classifier ever sees it.
-    roi_output_size: int = 4
-    # team_conditioned_detection.models.robot_role only: which features feed the role
-    # head's final classifier - the FiLM/cross-attention-conditioned deep
-    # feature, the hand-crafted colour-distance feature, or (default) both.
-    # At least one must stay True. Ablation knobs: distance-only isolates
-    # whether the hand-crafted nearest-colour feature alone explains most
-    # of the accuracy; deep-only isolates whether the learned conditioned
-    # pathway needs the hand-crafted feature's help at all.
-    role_head_use_deep_feature: bool = True
-    role_head_use_distance_feature: bool = True
-    # team_conditioned_detection.train_standalone_role_classifier only: spatial size of the
-    # RoIAlign'd raw-pixel crop fed to the standalone classifier's own
-    # lightweight CNN (see StandaloneRoleClassifier - this crop is on raw
-    # pixels, unrelated to roi_output_size above, which pools a detector's
-    # internal feature map instead).
+    # Hidden width of the conditioner's context MLP (for "concat", of the classifier MLP).
+    hidden_dim: int = 256
+    # Weight on the role cross-entropy, added to the detector's own loss.
+    role_loss_weight: float = 1.0
+    # Spatial resolution of the RoIAlign crop the role head pools from (both
+    # the conditioned feature and the raw-pixel colour-distance feature). A
+    # jersey covers only a small torso patch of the box - too coarse a grid
+    # blends it into the surrounding chassis.
+    roi_output_size: int = 8
+    # Append the min-over-cells RGB distance to each supplied colour to the
+    # conditioned feature before the role classifier.
+    use_distance_feature: bool = False
+    # standalone_role_classifier only: size of the raw-pixel RoIAlign crop
+    # fed to its own CNN, and that CNN's output channels.
     crop_size: int = 64
-    # team_conditioned_detection.train_standalone_role_classifier only: channel width of
-    # the standalone classifier's own dedicated feature (LightweightCropEncoder's
-    # output) - kept small deliberately, see standalone_role_classifier.py.
     encoder_channels: int = 128
 
 
 @dataclass
 class TrainConfig:
-    # Upper bound on training length - early_stopping_patience is what
-    # actually decides how long a run goes, so this just needs to be
-    # generous enough not to be the binding constraint.
+    # Upper bound on training length - early stopping decides how long a run
+    # actually goes.
     epochs: int = 200
     batch_size: int = 16
     lr: float = 1e-3
     weight_decay: float = 5e-4
     optimizer: str = "adamw"
-    device: str = "cpu"
+    device: str = "cuda"
     seed: int = 42
     eval_interval: int = 1
     conf_thres: float = 0.25
     output_dir: str = "outputs/run"
-    checkpoint_metric: str = "map_50"
-    # "max" for metrics where higher is better (map_50 and friends - the
-    # default). "min" for loss-like metrics (e.g. checkpoint_metric:
-    # "loss", val loss computed in engine/trainer.py's evaluate()) - use
-    # this when the "max" metric is too sparse/thresholded to be a
-    # reliable early-stopping signal, e.g. map_50 can sit at a hard 0.0
-    # for many epochs on a small/hard multi-instance task even while the
-    # model is genuinely improving.
-    checkpoint_metric_mode: str = "max"
-    # Early stopping normally just watches checkpoint_metric (default:
-    # unset, None). Set this to watch several val metrics independently
-    # instead, all compared in checkpoint_metric_mode's direction -
-    # training only stops once EVERY listed metric has gone
-    # early_stopping_patience evals without improving, not just their sum.
-    # Needed when checkpoint_metric bundles component losses that converge
-    # at different rates (e.g. robot_role.py's "loss" = detection_loss
-    # (fast) + role_loss (slow) - stopping on the combined total cuts the
-    # slower one off as soon as the faster one's plateau makes the *sum*
-    # look stalled, even while the slow one is still improving underneath).
+    # best.pt is chosen by this single val metric.
+    checkpoint_metric: str = "loss"
+    checkpoint_metric_mode: str = "min"
+    # Training stops once EVERY listed val metric has gone
+    # early_stopping_patience evals without improving by min_delta - needed
+    # because detection_loss (fast) and role_loss (slow) converge at very
+    # different rates. None = watch checkpoint_metric only.
     early_stopping_metrics: list[str] | None = None
-    # Per-metric direction, parallel to early_stopping_metrics ("max"/
-    # "min" each). None (default) = every watched metric uses
-    # checkpoint_metric_mode - only needed when the watched metrics don't
-    # all point the same way, e.g. watching role_acc (higher is better)
-    # alongside role_loss/detection_loss (lower is better) in the same run.
+    # Per-metric direction ("max"/"min"), parallel to early_stopping_metrics.
+    # None = every watched metric uses checkpoint_metric_mode.
     early_stopping_modes: list[str] | None = None
-    log_interval: int = 10
-    # Stop once every metric in early_stopping_metrics (defaults to just
-    # checkpoint_metric) hasn't improved (by min_delta) for this many
-    # *eval* epochs (i.e. eval_interval * early_stopping_patience training
-    # epochs). None disables early stopping entirely.
-    early_stopping_patience: int | None = 10
-    early_stopping_min_delta: float = 1e-4
+    log_interval: int = 20
+    # None disables early stopping.
+    early_stopping_patience: int | None = 50
+    early_stopping_min_delta: float = 1e-2
+
+
+@dataclass
+class RobotDataConfig:
+    train_manifest: str
+    val_manifest: str
+    test_manifest: str | None = None
+    img_size: int = 640
+    augment: bool = True
+    num_workers: int = 2
+    # Seed for the fixed teammate/opponent assignment on val/test (training
+    # re-randomises it every access). Deliberately independent of
+    # train.seed, so every training seed is evaluated on the same test labels.
+    eval_seed: int = 0
+
+
+@dataclass
+class RobotConfig:
+    name: str = "robot_jersey_run"
+    data: RobotDataConfig = field(default_factory=RobotDataConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
+
+
+# Configs saved by older versions of this code (outputs/*/config.yaml) still
+# load: renamed keys are mapped, and removed keys are dropped only if they
+# hold the value that made them a no-op - anything else means the run used a
+# feature this code no longer has.
+_RENAMED_KEYS = {
+    "model": {
+        "film_hidden_dim": "hidden_dim",
+        "auxiliary_loss_weight": "role_loss_weight",
+        "role_head_use_distance_feature": "use_distance_feature",
+    },
+}
+_REMOVED_KEYS = {
+    "model": {
+        "use_film": True,
+        "film_layer_indices": None,
+        "film_early": False,
+        "init_checkpoint": None,
+        "freeze_detector": False,
+        "role_head_use_deep_feature": True,
+    },
+    "data": {"wrong_conditioning": False},
+}
+
+
+def _upgrade_legacy(raw: dict[str, Any]) -> dict[str, Any]:
+    raw = {k: dict(v) if isinstance(v, dict) else v for k, v in raw.items()}
+    model = raw.get("model", {})
+    if "film_hidden_dim" in model and "role_head_use_distance_feature" not in model:
+        # Saved before the distance feature could be switched off - it was always on.
+        model["role_head_use_distance_feature"] = True
+    for section, renames in _RENAMED_KEYS.items():
+        for old, new in renames.items():
+            if old in raw.get(section, {}):
+                raw[section][new] = raw[section].pop(old)
+    for section, removed in _REMOVED_KEYS.items():
+        for key, inert_value in removed.items():
+            if key in raw.get(section, {}):
+                value = raw[section].pop(key)
+                if value != inert_value:
+                    raise ValueError(f"{section}.{key}={value!r} uses a removed feature (only {inert_value!r} is supported)")
+    return raw
 
 
 def _from_dict(cls, d: dict[str, Any]):
@@ -164,43 +160,16 @@ def _from_dict(cls, d: dict[str, Any]):
     return cls(**kwargs)
 
 
-@dataclass
-class RobotDataConfig:
-    train_manifest: str
-    val_manifest: str
-    test_manifest: str | None = None
-    img_size: int = 640
-    augment: bool = True
-    num_workers: int = 2
-    # Ablation: replace the injected (teammate_rgb, opponent_rgb) with a
-    # fresh random RGB pair, decoupled from the actual jersey colours -
-    # ground-truth labels stay correct, only the conditioning signal
-    # becomes uninformative. Tests whether *training* can still reach a
-    # non-trivial role_acc without any real colour signal to learn from
-    # (the training-time complement to the swap test run at eval time via
-    # scripts/evaluate_role_conditioning.py). See RobotJerseyDataset.
-    wrong_conditioning: bool = False
-
-
-@dataclass
-class RobotConfig:
-    name: str = "robot_jersey_run"
-    data: RobotDataConfig = field(default_factory=RobotDataConfig)
-    model: ModelConfig = field(default_factory=ModelConfig)
-    train: TrainConfig = field(default_factory=TrainConfig)
-
-
 def load_robot_config(path: str | Path) -> RobotConfig:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
-    return _from_dict(RobotConfig, raw)
+    return _from_dict(RobotConfig, _upgrade_legacy(raw))
+
+
+def config_to_dict(config: RobotConfig) -> dict[str, Any]:
+    return asdict(config)
 
 
 def save_robot_config(config: RobotConfig, path: str | Path) -> None:
-    def _to_dict(obj):
-        if is_dataclass(obj):
-            return {f.name: _to_dict(getattr(obj, f.name)) for f in fields(obj)}
-        return obj
-
     with open(path, "w") as f:
-        yaml.safe_dump(_to_dict(config), f, sort_keys=False)
+        yaml.safe_dump(config_to_dict(config), f, sort_keys=False)
