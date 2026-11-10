@@ -1,0 +1,37 @@
+# Table 1: FiLM role head on RT-DETR-L.
+# role_loss_weight 0.1 (not Faster R-CNN's 1.0) and min_delta 0.02 match the runs the paper reports.
+#   python -m team_detect.train --config configs/rtdetr_film.yaml --seed 42
+name: rtdetr_film
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+  eval_seed: 0
+model:
+  architecture: rtdetr_robot_role
+  variant: rtdetr-l
+  pretrained: true
+  conditioning_method: film
+  hidden_dim: 256
+  role_loss_weight: 0.1
+  roi_output_size: 8
+  use_distance_feature: false
+train:
+  epochs: 200
+  batch_size: 8
+  lr: 0.0001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  conf_thres: 0.25
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.02
+  output_dir: outputs/rtdetr_film/seed42

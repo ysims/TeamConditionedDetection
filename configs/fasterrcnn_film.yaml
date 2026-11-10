@@ -1,0 +1,36 @@
+# Table 1-4: FiLM role head on Faster R-CNN (ResNet-50-FPN).
+#   python -m team_detect.train --config configs/fasterrcnn_film.yaml --seed 42
+name: fasterrcnn_film
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+  eval_seed: 0
+model:
+  architecture: fasterrcnn_robot_role
+  variant: resnet50
+  pretrained: true
+  conditioning_method: film
+  hidden_dim: 256
+  role_loss_weight: 1.0
+  roi_output_size: 8
+  use_distance_feature: false
+train:
+  epochs: 200
+  batch_size: 4
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  conf_thres: 0.25
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  early_stopping_metrics: [detection_loss, role_loss, role_acc]
+  early_stopping_modes: [min, min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01
+  output_dir: outputs/fasterrcnn_film/seed42

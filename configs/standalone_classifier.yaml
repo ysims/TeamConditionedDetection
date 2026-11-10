@@ -1,0 +1,33 @@
+# Table 3: standalone FiLM-conditioned classifier on raw-pixel crops of ground-truth boxes, no detector.
+#   python -m team_detect.train --config configs/standalone_classifier.yaml --seed 42
+name: standalone_classifier
+data:
+  train_manifest: data/manifest_robots/train.csv
+  val_manifest: data/manifest_robots/val.csv
+  test_manifest: data/manifest_robots/test.csv
+  img_size: 640
+  augment: true
+  num_workers: 2
+  eval_seed: 0
+model:
+  architecture: standalone_role_classifier
+  conditioning_method: film
+  hidden_dim: 256
+  use_distance_feature: false
+  crop_size: 64
+  encoder_channels: 128
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  optimizer: adamw
+  device: cuda
+  seed: 42
+  checkpoint_metric: role_loss
+  checkpoint_metric_mode: min
+  early_stopping_metrics: [role_loss, role_acc]
+  early_stopping_modes: [min, max]
+  early_stopping_patience: 50
+  early_stopping_min_delta: 0.01
+  output_dir: outputs/standalone_classifier/seed42
